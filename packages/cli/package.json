@@ -1,10 +1,11 @@
 {
-  "name": "@agentx/cli",
+  "name": "animecode",
   "version": "0.1.0",
-  "description": "agentx —— 前端无关的 AI coding agent CLI（TUI）。多 provider、工具、权限、会话与守护进程。",
+  "description": "animecode —— 前端无关的 AI coding agent CLI（TUI）。多 provider、工具、权限、会话与守护进程。",
   "type": "module",
   "license": "MIT",
   "bin": {
+    "animecode": "./dist/cli.js",
     "agentx": "./dist/cli.js"
   },
   "files": [
@@ -13,9 +14,6 @@
   ],
   "engines": {
     "node": ">=18"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "keywords": [
     "ai",
