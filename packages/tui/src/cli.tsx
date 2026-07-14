@@ -29,7 +29,7 @@ import {
 import { App } from "./app.js";
 import { DebugLogger, withDebugLogging } from "./debug-log.js";
 
-const CLI_VERSION = "0.0.1";
+const CLI_VERSION = "0.1.0";
 const DEFAULT_MODEL = "anthropic/claude-opus-4-8";
 
 export interface CliArgs {

@@ -1,0 +1,48 @@
+{
+  "name": "@agentx/cli",
+  "version": "0.1.0",
+  "description": "agentx —— 前端无关的 AI coding agent CLI（TUI）。多 provider、工具、权限、会话与守护进程。",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "agentx": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "coding-agent",
+    "llm",
+    "anthropic",
+    "openai",
+    "tui"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anton6202527/agentx.git",
+    "directory": "packages/cli"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "prepublishOnly": "node build.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.111.0",
+    "ink": "^5.1.0",
+    "openai": "^6.0.0",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}
