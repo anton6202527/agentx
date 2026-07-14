@@ -1,0 +1,6 @@
+src/**
+esbuild.mjs
+tsconfig.json
+**/*.map
+**/*.ts
+.vscode/**

@@ -14,6 +14,8 @@
 export interface TextPart {
   type: "text";
   text: string;
+  /** 内部注入的上下文；provider 可见，但 transcript/UI 不应冒充用户原话展示。 */
+  internal?: boolean;
 }
 
 /** 模型的推理块。回放时必须原样传回（Anthropic 校验 signature） */

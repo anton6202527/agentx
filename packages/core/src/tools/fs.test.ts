@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { readTool, writeTool, editTool } from "./fs.js";
+import { readTool, writeTool, editTool, applyEdit } from "./fs.js";
 
 const ctx = (cwd: string) => ({ cwd, signal: new AbortController().signal });
 
@@ -81,4 +81,39 @@ test("沙箱: 正常读写/新建子目录文件不受影响", async () => {
   assert.equal(await fs.readFile(path.join(root, "ok.txt"), "utf8"), "编辑后内容");
 
   await fs.rm(base, { recursive: true, force: true });
+});
+
+test("applyEdit: 精确唯一匹配", () => {
+  const r = applyEdit("a\nfoo\nb", "foo", "bar", false);
+  assert.equal(r.mode, "exact");
+  assert.equal(r.replaced, 1);
+  assert.equal(r.updated, "a\nbar\nb");
+});
+
+test("applyEdit: 精确多处不唯一时报错，replace_all 全替换", () => {
+  assert.throws(() => applyEdit("x\nx", "x", "y", false), /不唯一/);
+  const r = applyEdit("x\nx", "x", "y", true);
+  assert.equal(r.replaced, 2);
+  assert.equal(r.updated, "y\ny");
+});
+
+test("applyEdit: 精确失败时按行空白容差模糊匹配", () => {
+  // 文件里是 4 空格缩进，模型给的 old_string 缩进不同 → 精确失败、模糊命中。
+  const content = "function f() {\n    return 1\n}";
+  const r = applyEdit(content, "function f() {\nreturn 1\n}", "function f() {\n    return 2\n}", false);
+  assert.equal(r.mode, "fuzzy");
+  assert.equal(r.updated, "function f() {\n    return 2\n}");
+});
+
+test("applyEdit: 全都匹配不上时抛反射式错误，附最接近片段", () => {
+  const content = "line one\nline two\nline three";
+  try {
+    applyEdit(content, "line tvvo", "x", false);
+    assert.fail("应抛错");
+  } catch (err) {
+    const msg = String((err as Error).message);
+    assert.match(msg, /未找到 old_string/);
+    // 反射：把文件里最接近的片段展示出来供模型自我纠正
+    assert.match(msg, /最接近的片段/);
+  }
 });

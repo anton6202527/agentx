@@ -50,6 +50,81 @@ test("SessionStore: create/append/load/list 往返", async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test("SessionStore: JSONL mtime 驱动最近活跃排序与 load.updatedAt", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agentx-sess-"));
+  const store = new SessionStore(dir);
+  await store.create({ id: "s_old", cwd: "/x", model: "m" });
+  await store.create({ id: "s_new", cwd: "/x", model: "m" });
+
+  // 使用固定的未来时间，避免依赖定时器与文件系统 mtime 精度。
+  const activity = new Date("2040-01-02T03:04:05.000Z");
+  await fs.utimes(path.join(dir, "s_old.jsonl"), activity, activity);
+
+  const list = await store.list();
+  assert.equal(list[0]!.id, "s_old");
+  assert.equal(list[0]!.updatedAt, activity.toISOString());
+  assert.equal((await store.load("s_old")).updatedAt, activity.toISOString());
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("SessionStore: 会话目录/文件为私有权限，并自动收紧旧文件", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agentx-sess-mode-"));
+  const dir = path.join(root, "sessions");
+  const store = new SessionStore(dir);
+  const meta = await store.create({ id: "s_private", cwd: "/x", model: "m" });
+  const file = path.join(dir, "s_private.jsonl");
+
+  assert.equal((await fs.stat(dir)).mode & 0o777, 0o700);
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+
+  // 模拟旧版本留下的宽权限；append/load/rewrite 都会迁移回私有权限。
+  await fs.chmod(dir, 0o755);
+  await fs.chmod(file, 0o644);
+  await store.append("s_private", {
+    role: "user",
+    content: [{ type: "text", text: "private prompt" }],
+  });
+  assert.equal((await fs.stat(dir)).mode & 0o777, 0o700);
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+
+  await fs.chmod(file, 0o644);
+  const loaded = await store.load("s_private");
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+  await store.rewrite(meta, loaded.messages);
+  assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("SessionStore: 会话 id 不能路径穿越，meta id 必须与文件名一致", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agentx-sess-boundary-"));
+  const sessions = path.join(root, "sessions");
+  await fs.mkdir(sessions);
+  const outside = {
+    id: "../outside",
+    cwd: "/secret",
+    model: "debug/demo",
+    createdAt: "2026-07-14T00:00:00.000Z",
+    updatedAt: "2026-07-14T00:00:00.000Z",
+  };
+  await fs.writeFile(
+    path.join(root, "outside.jsonl"),
+    `${JSON.stringify({ __meta: outside })}\n${JSON.stringify({ role: "user", content: [{ type: "text", text: "TOP SECRET" }] })}\n`,
+  );
+  await fs.writeFile(
+    path.join(sessions, "safe.jsonl"),
+    `${JSON.stringify({ __meta: { ...outside, id: "different" } })}\n`,
+  );
+  const store = new SessionStore(sessions);
+
+  await assert.rejects(store.load("../outside"), /非法会话 id/);
+  await assert.rejects(store.load("safe"), /meta id 不匹配/);
+  assert.deepEqual(await store.list(), []);
+
+  await fs.rm(root, { recursive: true, force: true });
+});
+
 test("Agent: 对话自动持久化，可 resume 续接", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agentx-sess-"));
   const store = new SessionStore(dir);

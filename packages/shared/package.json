@@ -1,0 +1,17 @@
+{
+  "name": "@agentx/shared",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "前端共享的纯逻辑：transcript 重建与 Markdown 解析（无框架、无 DOM 依赖）",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentx/core": "*"
+  }
+}

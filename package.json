@@ -7,6 +7,10 @@
     "packages/*"
   ],
   "scripts": {
+    "dev:tui": "tsx packages/tui/src/cli.tsx --demo --cwd . --sessions .agentx-dev/sessions --debug-log .agentx-dev/tui.jsonl",
+    "dev:app": "npm run dev --workspace @agentx/app",
+    "build:app": "npm run build --workspace @agentx/app",
+    "build:vscode": "npm run build --workspace agentx-vscode",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"
   },

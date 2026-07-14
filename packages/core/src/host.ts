@@ -7,9 +7,15 @@
  * 两者行为等价，可互换 —— 正如 core 对 UI 无关，前端也对传输无关。
  */
 
-import type { SessionEvent, SessionSnapshot, SessionSummary, SessionManager } from "./session-manager.js";
+import type {
+  PermissionAnswer,
+  SessionEvent,
+  SessionSnapshot,
+  SessionSummary,
+  SessionManager,
+} from "./session-manager.js";
 
-export type PermissionDecisionKind = "allow" | "allow_remember" | "deny";
+export type PermissionDecisionKind = PermissionAnswer;
 
 export interface OpenHandle {
   snapshot: SessionSnapshot;
@@ -25,8 +31,13 @@ export interface SessionHost {
   /** 发消息驱动 loop；事件经 open 的 listener 回流；resolve 于本次 loop 结束 */
   send(sessionId: string, text: string): Promise<void>;
   interrupt(sessionId: string): Promise<void>;
-  answerPermission(sessionId: string, permId: string, decision: PermissionDecisionKind): Promise<void>;
-  /** 释放资源（远程实现断开 socket；本地实现无操作） */
+  /** true 表示本次成功裁决；false 表示已被其他观察者抢先处理或请求已失效。 */
+  answerPermission(
+    sessionId: string,
+    permId: string,
+    decision: PermissionDecisionKind,
+  ): Promise<boolean | void>;
+  /** 释放资源：远程断开 socket；本地中断本进程持有的 live drive。 */
   dispose(): void;
 }
 
@@ -49,10 +60,10 @@ export class LocalSessionHost implements SessionHost {
   interrupt(sessionId: string): Promise<void> {
     return this.manager.interrupt(sessionId);
   }
-  async answerPermission(sessionId: string, permId: string, decision: PermissionDecisionKind): Promise<void> {
-    await this.manager.answerPermission(sessionId, permId, decision);
+  answerPermission(sessionId: string, permId: string, decision: PermissionDecisionKind): Promise<boolean> {
+    return this.manager.answerPermission(sessionId, permId, decision);
   }
   dispose(): void {
-    /* 进程内无需释放 */
+    this.manager.dispose();
   }
 }

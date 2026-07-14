@@ -8,46 +8,197 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
-import { promises as fs } from "node:fs";
+import * as net from "node:net";
+import { promises as fs, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { DaemonServer } from "./server.js";
 import { SessionManager } from "../session-manager.js";
 import { SessionStore } from "../session.js";
-import { createProvider } from "../provider/registry.js";
+import { createProvider, diagnoseProvider } from "../provider/registry.js";
 
 export function defaultSocketPath(): string {
   return path.join(os.tmpdir(), "agentx.sock");
 }
 
-async function main() {
-  const argv = process.argv.slice(2);
-  const get = (f: string, d: string) => {
-    const i = argv.indexOf(f);
-    return i >= 0 ? argv[i + 1]! : d;
-  };
-  const socketPath = get("--socket", defaultSocketPath());
-  const sessionsDir = get("--sessions", path.join(os.homedir(), ".agentx", "sessions"));
+const DAEMON_VERSION = "0.0.1";
 
-  await fs.rm(socketPath, { force: true }); // 清理旧 socket
+export interface DaemonArgs {
+  socketPath: string;
+  sessionsDir: string;
+  permissionMode: "default" | "acceptEdits" | "auto";
+  help: boolean;
+  version: boolean;
+}
+
+export function daemonHelpText(): string {
+  return `agentx-daemon ${DAEMON_VERSION}\n\n` +
+    `用法: agentx-daemon [选项]\n\n` +
+    `  --socket <path>       Unix socket 路径（默认 ${defaultSocketPath()}）\n` +
+    `  --sessions <dir>      会话目录（默认 ~/.agentx/sessions）\n` +
+    `  --auto                自动允许工具操作\n` +
+    `  --accept-edits        自动允许文件编辑，命令仍询问\n` +
+    `  -h, --help            显示帮助\n` +
+    `  -v, --version         显示版本`;
+}
+
+export function parseDaemonArgs(argv: string[]): DaemonArgs {
+  let socketPath = defaultSocketPath();
+  let sessionsDir = path.join(os.homedir(), ".agentx", "sessions");
+  let permissionMode: DaemonArgs["permissionMode"] = "default";
+  let help = false;
+  let version = false;
+  const seen = new Set<string>();
+  const mark = (flag: string) => {
+    if (seen.has(flag)) throw new Error(`${flag} 不能重复指定`);
+    seen.add(flag);
+  };
+  const valueAfter = (index: number, flag: string): string => {
+    const value = argv[index + 1];
+    if (!value || value.startsWith("-")) throw new Error(`${flag} 需要一个值`);
+    return value;
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    switch (arg) {
+      case "--socket":
+        mark(arg);
+        socketPath = path.resolve(valueAfter(i, arg));
+        i++;
+        break;
+      case "--sessions":
+        mark(arg);
+        sessionsDir = path.resolve(valueAfter(i, arg));
+        i++;
+        break;
+      case "--auto":
+      case "--accept-edits":
+        mark(arg);
+        if (permissionMode !== "default") {
+          throw new Error("--auto 与 --accept-edits 不能同时使用");
+        }
+        permissionMode = arg === "--auto" ? "auto" : "acceptEdits";
+        break;
+      case "--help":
+      case "-h":
+        mark("--help");
+        help = true;
+        break;
+      case "--version":
+      case "-v":
+        mark("--version");
+        version = true;
+        break;
+      default:
+        throw new Error(`未知参数: ${arg}\n使用 --help 查看可用参数。`);
+    }
+  }
+  return { socketPath, sessionsDir, permissionMode, help, version };
+}
+
+function resolveConfiguredProvider(model: string) {
+  const diagnostics = diagnoseProvider(model);
+  if (diagnostics.requiresApiKey && !diagnostics.hasCredentials) {
+    throw new Error(
+      `${diagnostics.warnings.join("；")}（请在 daemon 进程环境中配置，或使用 debug/demo）`,
+    );
+  }
+  return createProvider(model);
+}
+
+export async function main(argv = process.argv.slice(2)): Promise<void> {
+  const args = parseDaemonArgs(argv);
+  if (args.help) {
+    console.log(daemonHelpText());
+    return;
+  }
+  if (args.version) {
+    console.log(DAEMON_VERSION);
+    return;
+  }
+
+  await removeStaleSocket(args.socketPath);
 
   const manager = new SessionManager({
-    store: new SessionStore(sessionsDir),
-    resolveProvider: (model) => createProvider(model),
+    store: new SessionStore(args.sessionsDir),
+    resolveProvider: resolveConfiguredProvider,
     compaction: true,
+    permission: { mode: args.permissionMode },
+    skills: true,
+    subagents: true,
   });
   const server = new DaemonServer({ manager });
-  await server.listen(socketPath);
-  console.log(`agentx daemon 监听于 ${socketPath}（会话目录 ${sessionsDir}）`);
+  await server.listen(args.socketPath);
+  console.log(
+    `agentx daemon 监听于 ${args.socketPath}` +
+      `（会话目录 ${args.sessionsDir}，权限 ${args.permissionMode}）`,
+  );
 
   const shutdown = async () => {
     await server.close();
-    await fs.rm(socketPath, { force: true });
+    await fs.rm(args.socketPath, { force: true });
     process.exit(0);
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 }
 
-main().catch((err) => {
-  console.error(String(err?.stack ?? err));
-  process.exit(1);
-});
+export async function removeStaleSocket(socketPath: string): Promise<void> {
+  try {
+    const stat = await fs.lstat(socketPath);
+    if (!stat.isSocket()) {
+      throw new Error(`拒绝删除非 socket 路径: ${socketPath}`);
+    }
+    if (await socketIsActive(socketPath)) {
+      throw new Error(`daemon 已在监听: ${socketPath}`);
+    }
+    await fs.rm(socketPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function socketIsActive(socketPath: string): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    const timer = setTimeout(() => {
+      cleanup();
+      socket.destroy();
+      reject(new Error(`无法确认 socket 是否陈旧: ${socketPath}`));
+    }, 500);
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.removeAllListeners();
+    };
+    socket.once("connect", () => {
+      cleanup();
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      cleanup();
+      socket.destroy();
+      if (error.code === "ECONNREFUSED" || error.code === "ENOENT") resolve(false);
+      else reject(error);
+    });
+  });
+}
+
+function canonicalPath(file: string): string {
+  try {
+    return realpathSync(file);
+  } catch {
+    return path.resolve(file);
+  }
+}
+
+const invokedPath = process.argv[1];
+if (
+  invokedPath &&
+  canonicalPath(fileURLToPath(import.meta.url)) === canonicalPath(path.resolve(invokedPath))
+) {
+  main().catch((err) => {
+    console.error(String((err as { stack?: unknown })?.stack ?? err));
+    process.exitCode = 1;
+  });
+}

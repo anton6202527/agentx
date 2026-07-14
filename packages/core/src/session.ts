@@ -11,6 +11,7 @@
  */
 
 import { promises as fs, createReadStream } from "node:fs";
+import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
@@ -48,21 +49,44 @@ export class SessionStore {
   }
 
   private file(id: string): string {
+    assertSessionId(id);
     return path.join(this.dir, `${id}.jsonl`);
+  }
+
+  private async ensurePrivateDir(): Promise<void> {
+    await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
+    const stat = await fs.lstat(this.dir);
+    if (!stat.isDirectory()) throw new Error(`会话路径不是普通目录: ${this.dir}`);
+    // mkdir 的 mode 受 umask 影响且不会修复既有目录，因此始终显式收紧。
+    await fs.chmod(this.dir, 0o700);
+  }
+
+  private async secureExistingFile(file: string): Promise<void> {
+    const stat = await fs.lstat(file);
+    if (!stat.isFile()) throw new Error(`会话路径不是普通文件: ${file}`);
+    await fs.chmod(file, 0o600);
   }
 
   /** 创建新会话文件，写入 meta 头行 */
   async create(meta: Omit<SessionMeta, "createdAt" | "updatedAt">): Promise<SessionMeta> {
-    await fs.mkdir(this.dir, { recursive: true });
+    await this.ensurePrivateDir();
     const now = new Date().toISOString();
     const full: SessionMeta = { ...meta, createdAt: now, updatedAt: now };
-    await fs.writeFile(this.file(meta.id), JSON.stringify({ __meta: full }) + "\n", "utf8");
+    await fs.writeFile(this.file(meta.id), JSON.stringify({ __meta: full }) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    });
     return full;
   }
 
   /** 追加一条消息（每轮结束调用） */
   async append(id: string, message: ChatMessage): Promise<void> {
-    await fs.appendFile(this.file(id), JSON.stringify(message) + "\n", "utf8");
+    await this.ensurePrivateDir();
+    const file = this.file(id);
+    // 先 chmod 也让旧版本留下的 0644 会话在下一次使用时自动迁移。
+    await this.secureExistingFile(file);
+    await fs.appendFile(file, JSON.stringify(message) + "\n", "utf8");
   }
 
   /**
@@ -71,19 +95,35 @@ export class SessionStore {
    * 原会话文件要么是旧的完整版本、要么是新的完整版本，绝不会半截。
    */
   async rewrite(meta: SessionMeta, messages: ChatMessage[]): Promise<void> {
-    await fs.mkdir(this.dir, { recursive: true });
+    await this.ensurePrivateDir();
     const updated: SessionMeta = { ...meta, updatedAt: new Date().toISOString() };
     const lines = [JSON.stringify({ __meta: updated }), ...messages.map((m) => JSON.stringify(m))];
     const target = this.file(meta.id);
-    const tmp = `${target}.tmp`;
-    await fs.writeFile(tmp, lines.join("\n") + "\n", "utf8");
-    await fs.rename(tmp, target);
+    await this.secureExistingFile(target);
+    const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await fs.writeFile(tmp, lines.join("\n") + "\n", {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      });
+      await fs.rename(tmp, target);
+      await fs.chmod(target, 0o600);
+    } finally {
+      await fs.rm(tmp, { force: true });
+    }
+    // meta 与 live ManagedSession/Agent persistence 共享同一对象。只在原子替换
+    // 成功后同步它，保证 snapshot 不会继续展示旧的活跃时间。
+    meta.updatedAt = updated.updatedAt;
   }
 
   /** 读取整个会话（流式逐行解析，避免大文件一次性读入） */
   async load(id: string): Promise<SessionData> {
+    await this.ensurePrivateDir();
+    const file = this.file(id);
+    await this.secureExistingFile(file);
     const rl = readline.createInterface({
-      input: createReadStream(this.file(id), "utf8"),
+      input: createReadStream(file, "utf8"),
       crlfDelay: Infinity,
     });
     let meta: SessionMeta | null = null;
@@ -95,13 +135,17 @@ export class SessionStore {
       else messages.push(obj as ChatMessage);
     }
     if (!meta) throw new Error(`会话 ${id} 缺少 meta 头`);
-    return { ...meta, messages };
+    if (meta.id !== id) {
+      throw new Error(`会话 ${id} 的 meta id 不匹配: ${meta.id}`);
+    }
+    return { ...(await withFileActivity(meta, file)), messages };
   }
 
   /** 列出所有会话的 meta（按 updatedAt 倒序），不加载消息 */
   async list(): Promise<SessionMeta[]> {
     let files: string[];
     try {
+      await this.ensurePrivateDir();
       files = await fs.readdir(this.dir);
     } catch {
       return [];
@@ -110,9 +154,15 @@ export class SessionStore {
     for (const f of files) {
       if (!f.endsWith(".jsonl")) continue;
       try {
-        const first = await readFirstLine(path.join(this.dir, f));
+        const file = path.join(this.dir, f);
+        await this.secureExistingFile(file);
+        const first = await readFirstLine(file);
         const obj = JSON.parse(first);
-        if (obj.__meta) metas.push(obj.__meta);
+        const expectedId = f.slice(0, -".jsonl".length);
+        if (obj.__meta && (obj.__meta as SessionMeta).id === expectedId) {
+          assertSessionId(expectedId);
+          metas.push(await withFileActivity(obj.__meta as SessionMeta, file));
+        }
       } catch {
         /* 跳过损坏文件 */
       }
@@ -121,8 +171,32 @@ export class SessionStore {
   }
 
   async delete(id: string): Promise<void> {
+    await this.ensurePrivateDir();
     await fs.rm(this.file(id), { force: true });
   }
+}
+
+function assertSessionId(id: string): void {
+  if (
+    id.length === 0 ||
+    id.length > 128 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)
+  ) {
+    throw new Error(`非法会话 id: ${JSON.stringify(id)}`);
+  }
+}
+
+/**
+ * JSONL 采用追加写，不能为更新时间重写首行；文件 mtime 就是持久化层的活跃时钟。
+ * 同时保留首行中更晚的时间，兼容文件复制/恢复导致 mtime 回退的情况。
+ */
+async function withFileActivity(meta: SessionMeta, file: string): Promise<SessionMeta> {
+  const stat = await fs.stat(file);
+  const stored = Date.parse(meta.updatedAt);
+  const activityMs = Number.isFinite(stored)
+    ? Math.max(stored, stat.mtimeMs)
+    : stat.mtimeMs;
+  return { ...meta, updatedAt: new Date(activityMs).toISOString() };
 }
 
 async function readFirstLine(file: string): Promise<string> {

@@ -11,23 +11,46 @@ import type { SessionHost, OpenHandle, PermissionDecisionKind } from "../host.js
 import {
   decodeLines,
   encodeFrame,
+  isServerFrame,
+  MAX_RESULT_BYTES,
   type ClientRequest,
   type ServerFrame,
 } from "./protocol.js";
+
+interface ClientSubscription {
+  listener: (ev: SessionEvent) => void;
+  buffered: SessionEvent[];
+  active: boolean;
+  closed: boolean;
+  activation?: NodeJS.Immediate;
+}
 
 export class DaemonClient implements SessionHost {
   private sock: net.Socket;
   private buffer = "";
   private nextId = 1;
-  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-  private listeners = new Map<string, (ev: SessionEvent) => void>();
+  private pending = new Map<
+    number,
+    {
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+      chunks?: string[];
+      chunkBytes?: number;
+    }
+  >();
+  private listeners = new Map<string, ClientSubscription>();
+  /** 同一 session 的远端 open/close 必须按序确认，避免旧世代事件混入新 snapshot。 */
+  private subscriptionOps = new Map<string, Promise<void>>();
+  private terminalError: Error | undefined;
 
   private constructor(sock: net.Socket) {
     this.sock = sock;
-    sock.on("data", (chunk) => this.onData(chunk.toString()));
+    // 使用 socket 内建 StringDecoder，避免中文等 UTF-8 字符跨网络 chunk 时损坏。
+    sock.setEncoding("utf8");
+    sock.on("data", (chunk) => this.onData(chunk as unknown as string));
+    sock.on("error", (error) => this.markTerminal(error));
     sock.on("close", () => {
-      for (const p of this.pending.values()) p.reject(new Error("daemon 连接已断开"));
-      this.pending.clear();
+      this.markTerminal(new Error("daemon 连接已断开"));
     });
   }
 
@@ -39,10 +62,37 @@ export class DaemonClient implements SessionHost {
   }
 
   private onData(chunk: string): void {
-    this.buffer += chunk;
-    const { messages, rest } = decodeLines<ServerFrame>(this.buffer);
-    this.buffer = rest;
-    for (const frame of messages) this.dispatch(frame);
+    try {
+      this.buffer += chunk;
+      const { messages, rest } = decodeLines<unknown>(this.buffer);
+      this.buffer = rest;
+      for (const frame of messages) {
+        if (!isServerFrame(frame)) throw new Error("无效 daemon frame");
+        this.dispatch(frame);
+      }
+    } catch {
+      this.markTerminal(new Error("daemon 返回了无效或过大的协议帧"));
+      this.sock.destroy();
+    }
+  }
+
+  private failPending(error: Error): void {
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
+  }
+
+  private markTerminal(error: Error): void {
+    this.terminalError ??= error;
+    this.failPending(this.terminalError);
+  }
+
+  /** 用户 listener 属于 UI 边界；单个渲染器异常不能截断 socket 帧分发。 */
+  private deliver(sub: ClientSubscription, event: SessionEvent): void {
+    try {
+      sub.listener(event);
+    } catch {
+      // SessionManager 的本地广播同样隔离 listener；远端保持一致语义。
+    }
   }
 
   private dispatch(frame: ServerFrame): void {
@@ -52,17 +102,62 @@ export class DaemonClient implements SessionHost {
       this.pending.delete(frame.id);
       if (frame.ok) p.resolve(frame.data);
       else p.reject(new Error(frame.error));
+    } else if (frame.type === "result_chunk") {
+      const pending = this.pending.get(frame.id);
+      if (!pending) return;
+      pending.chunks ??= [];
+      pending.chunkBytes =
+        (pending.chunkBytes ?? 0) + Buffer.byteLength(frame.chunk, "utf8");
+      // daemon 是本机受信进程，但仍给损坏/恶意 peer 一个总结果硬上限。
+      if (pending.chunkBytes > MAX_RESULT_BYTES) {
+        this.pending.delete(frame.id);
+        pending.reject(new Error(`daemon 分块结果超过 ${MAX_RESULT_BYTES} bytes`));
+        this.markTerminal(new Error("daemon 分块结果超过安全上限"));
+        this.sock.destroy();
+        return;
+      }
+      pending.chunks.push(frame.chunk);
+      if (frame.done) {
+        this.pending.delete(frame.id);
+        try {
+          pending.resolve(JSON.parse(pending.chunks.join("")) as unknown);
+        } catch {
+          pending.reject(new Error("daemon 分块结果不是有效 JSON"));
+          this.markTerminal(new Error("daemon 分块结果不是有效 JSON"));
+          this.sock.destroy();
+        }
+      }
     } else if (frame.type === "session_event") {
-      this.listeners.get(frame.sessionId)?.(frame.event);
+      const sub = this.listeners.get(frame.sessionId);
+      if (!sub || sub.closed) return;
+      if (sub.active) this.deliver(sub, frame.event);
+      else sub.buffered.push(frame.event);
     }
   }
 
   private request<T>(build: (id: number) => ClientRequest): Promise<T> {
+    if (this.terminalError || this.sock.destroyed) {
+      return Promise.reject(this.terminalError ?? new Error("daemon 连接已关闭"));
+    }
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
       this.sock.write(encodeFrame(build(id)));
     });
+  }
+
+  private subscriptionOperation<T>(sessionId: string, run: () => Promise<T>): Promise<T> {
+    const previous = this.subscriptionOps.get(sessionId) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(run);
+    const gate = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.subscriptionOps.set(sessionId, gate);
+    void gate.then(() => {
+      if (this.subscriptionOps.get(sessionId) === gate) this.subscriptionOps.delete(sessionId);
+    });
+    return operation;
   }
 
   // ---------- SessionHost ----------
@@ -81,18 +176,67 @@ export class DaemonClient implements SessionHost {
     }));
   }
 
-  async open(sessionId: string, listener: (ev: SessionEvent) => void): Promise<OpenHandle> {
-    this.listeners.set(sessionId, listener);
-    const { snapshot } = await this.request<{ snapshot: SessionSnapshot }>((id) => ({
-      id,
-      method: "open",
-      sessionId,
-    }));
+  open(sessionId: string, listener: (ev: SessionEvent) => void): Promise<OpenHandle> {
+    return this.subscriptionOperation(sessionId, () => this.openSerialized(sessionId, listener));
+  }
+
+  private async openSerialized(
+    sessionId: string,
+    listener: (ev: SessionEvent) => void,
+  ): Promise<OpenHandle> {
+    // 服务端为避免 snapshot 与订阅之间出现空窗，会先订阅再回结果。因此结果帧
+    // 飞行期间可能已经有实时事件到达；先缓冲，等调用方拿到并应用 snapshot 后
+    // 再于下一 macrotask 顺序回放，避免旧 snapshot 覆盖新事件。
+    const previous = this.listeners.get(sessionId);
+    if (previous && !previous.closed) {
+      // 重新 open 是新订阅世代。先停止本地路由并等服务端确认 close，期间旧
+      // listener 的尾事件直接丢弃；它们会进入随后取得的 snapshot，不能再回放。
+      previous.closed = true;
+      if (previous.activation) clearImmediate(previous.activation);
+      this.listeners.delete(sessionId);
+      await this.request((id) => ({ id, method: "close", sessionId }));
+    }
+    const sub: ClientSubscription = { listener, buffered: [], active: false, closed: false };
+    this.listeners.set(sessionId, sub);
+    let response: { snapshot?: SessionSnapshot; alreadyOpen?: boolean };
+    try {
+      response = await this.request((id) => ({ id, method: "open", sessionId }));
+    } catch (err) {
+      if (this.listeners.get(sessionId) === sub) {
+        sub.closed = true;
+        this.listeners.delete(sessionId);
+      }
+      throw err;
+    }
+    if (!response.snapshot) {
+      if (this.listeners.get(sessionId) === sub) {
+        sub.closed = true;
+        this.listeners.delete(sessionId);
+      }
+      throw new Error(
+        `daemon open(${sessionId}) 未返回 snapshot` +
+          (response.alreadyOpen ? "：当前 daemon 不支持安全的重复 open，请升级 daemon" : ""),
+      );
+    }
+    const snapshot = response.snapshot;
+    sub.activation = setImmediate(() => {
+      if (sub.closed || this.listeners.get(sessionId) !== sub) return;
+      sub.active = true;
+      for (const event of sub.buffered.splice(0)) this.deliver(sub, event);
+    });
     return {
       snapshot,
       close: () => {
+        if (sub.closed) return;
+        sub.closed = true;
+        if (sub.activation) clearImmediate(sub.activation);
+        if (this.listeners.get(sessionId) !== sub) return;
         this.listeners.delete(sessionId);
-        void this.request((id) => ({ id, method: "close", sessionId }));
+        void this.subscriptionOperation(sessionId, () =>
+          this.request((id) => ({ id, method: "close", sessionId })),
+        ).catch(() => {
+          // 连接关闭时取消订阅本就是 best-effort，不能制造 unhandled rejection。
+        });
       },
     };
   }
@@ -105,11 +249,23 @@ export class DaemonClient implements SessionHost {
     await this.request((id) => ({ id, method: "interrupt", sessionId }));
   }
 
-  async answerPermission(sessionId: string, permId: string, decision: PermissionDecisionKind): Promise<void> {
-    await this.request((id) => ({ id, method: "answerPermission", sessionId, permId, decision }));
+  answerPermission(
+    sessionId: string,
+    permId: string,
+    decision: PermissionDecisionKind,
+  ): Promise<boolean> {
+    return this.request((id) => ({ id, method: "answerPermission", sessionId, permId, decision }));
   }
 
   dispose(): void {
-    this.sock.end();
+    for (const sub of this.listeners.values()) {
+      sub.closed = true;
+      if (sub.activation) clearImmediate(sub.activation);
+    }
+    this.listeners.clear();
+    this.markTerminal(new Error("daemon client 已释放"));
+    // end() 只关闭 writable half；异常/旧 daemon 若不回 FIN，会留下 readOnly
+    // socket 挂住进程退出。dispose 是终态，直接销毁双向连接。
+    this.sock.destroy();
   }
 }

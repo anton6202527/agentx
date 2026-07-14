@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadProjectMemory, composeSystem, estimateTokens, maybeCompact } from "./context.js";
+import { loadProjectMemory, composeSystem, estimateTokens, maybeCompact, microcompact } from "./context.js";
 import { textMessage, type ChatMessage } from "./types.js";
 
 test("项目记忆: 逐级向上收集 AGENTS.md，止于 .git", async () => {
@@ -141,4 +141,45 @@ test("compaction: 超阈值时旧轮被摘要，最近轮保留", async () => {
   // 最近轮是原文尾部
   assert.match((res.messages[5]!.content[0] as any).text, /#19/);
   assert.ok(res.afterTokens < res.beforeTokens);
+});
+
+test("microcompaction: 只清旧工具结果且不修改传入历史", () => {
+  const history: ChatMessage[] = [0, 1, 2].flatMap((i) => [
+    { role: "assistant" as const, content: [{ type: "tool_call" as const, id: `c${i}`, name: "read", args: {} }] },
+    { role: "user" as const, content: [{ type: "tool_result" as const, toolCallId: `c${i}`, toolName: "read", content: `${i}:` + "x".repeat(500) }] },
+  ]);
+  const res = microcompact(history, 1);
+  assert.equal(res.cleared, 2);
+  assert.match((history[1]!.content[0] as any).content, /^0:x/);
+  assert.match((res.messages[1]!.content[0] as any).content, /已清理/);
+  assert.match((res.messages[5]!.content[0] as any).content, /^2:x/);
+});
+
+test("compaction: L2 摘要读取原始工具结果，而不是 microcompaction 占位符", async () => {
+  const history: ChatMessage[] = [];
+  for (let i = 0; i < 4; i++) {
+    history.push(textMessage("user", `任务 ${i} ` + "u".repeat(2_000)));
+    history.push({ role: "assistant", content: [{ type: "tool_call", id: `c${i}`, name: "read", args: {} }] });
+    history.push({ role: "user", content: [{
+      type: "tool_result",
+      toolCallId: `c${i}`,
+      toolName: "read",
+      content: `ORIGINAL_RESULT_${i}:` + "r".repeat(2_000),
+    }] });
+    history.push(textMessage("assistant", `完成 ${i}`));
+  }
+  let summaryInput: ChatMessage[] = [];
+  const res = await maybeCompact(history, {
+    triggerTokens: 1_000,
+    keepRecentMessages: 4,
+    keepToolResults: 0,
+    summarizer: async (messages) => {
+      summaryInput = messages;
+      return "summary";
+    },
+  });
+  assert.equal(res.compacted, true);
+  const summarizedText = JSON.stringify(summaryInput);
+  assert.match(summarizedText, /ORIGINAL_RESULT_0/);
+  assert.doesNotMatch(summarizedText, /旧工具结果已清理/);
 });

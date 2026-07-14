@@ -41,11 +41,12 @@ before(async () => {
             ...chunkBase,
             choices: [{
               index: 0,
-              delta: { tool_calls: [{ index: 0, id: "call_abc", type: "function", function: { name: "add", arguments: "" } }] },
+              // 某些兼容端点会把 id/name 也拆片；adapter 必须和 arguments 一样聚合。
+              delta: { tool_calls: [{ index: 0, id: "call_", type: "function", function: { name: "a", arguments: '{"a":' } }] },
               finish_reason: null,
             }],
           },
-          { ...chunkBase, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"a":12345,' } }] }, finish_reason: null }] },
+          { ...chunkBase, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "abc", function: { name: "dd", arguments: "12345," } }] }, finish_reason: null }] },
           { ...chunkBase, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '"b":67890}' } }] }, finish_reason: null }] },
           { ...chunkBase, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
           { ...chunkBase, choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 40 } } },
@@ -90,10 +91,17 @@ test("OpenAI 兼容层: 完整工具调用回路", async () => {
   assert.equal(calls[0]!.name, "add");
   assert.deepEqual(calls[0]!.args, { a: 12345, b: 67890 });
 
-  // 事件顺序：start → delta(×2) → end
+  // 事件顺序与 id 配对：start → delta(×3) → end
   const kinds = events1.map((e) => e.type);
   assert.ok(kinds.indexOf("tool_call_start") < kinds.indexOf("tool_call_delta"));
   assert.ok(kinds.lastIndexOf("tool_call_delta") < kinds.indexOf("tool_call_end"));
+  for (const event of events1) {
+    if (event.type === "tool_call_start" || event.type === "tool_call_delta") {
+      assert.equal(event.id, "call_abc");
+    } else if (event.type === "tool_call_end") {
+      assert.equal(event.part.id, "call_abc");
+    }
+  }
 
   // ---- 回传工具结果，第二轮 ----
   messages.push(done1.message);

@@ -1,0 +1,55 @@
+{
+  "name": "@agentx/app",
+  "version": "0.0.1",
+  "private": true,
+  "description": "agentx 桌面应用（Electron）—— ChatGPT 风格界面 + 插件市场，复用 @agentx/core",
+  "author": "agentx",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pack": "electron-vite build && electron-builder --dir",
+    "dist": "electron-vite build && electron-builder"
+  },
+  "build": {
+    "appId": "dev.agentx.app",
+    "productName": "agentx",
+    "electronVersion": "43.1.0",
+    "directories": {
+      "output": "release",
+      "buildResources": "build-resources"
+    },
+    "files": ["out/**/*", "package.json"],
+    "extraMetadata": { "main": "out/main/index.js" },
+    "npmRebuild": false,
+    "mac": {
+      "target": ["dmg"],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Development"
+    }
+  },
+  "dependencies": {
+    "@agentx/core": "*",
+    "@agentx/shared": "*"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^43.0.0",
+    "electron-builder": "^26.0.0",
+    "electron-vite": "^5.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^7.0.0"
+  }
+}

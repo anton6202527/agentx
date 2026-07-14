@@ -1,9 +1,13 @@
 node_modules/
 dist/
 build/
+out/
+release/
 coverage/
 *.log
 *.tmp
 .DS_Store
 .env
 .env.*
+.agentx-dev/
+*.vsix

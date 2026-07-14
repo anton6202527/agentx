@@ -1,158 +1,295 @@
 # agentx
 
-自研 AI coding agent 的正式代码库（monorepo）。技术栈：**TypeScript (Node/Bun) · Ink (TUI) · Electron (App 壳，阶段二)**。
+一个 TypeScript 编写、前端无关的 AI coding agent。当前仓库包含：
 
-```
+```text
 packages/
-  core/     # Agent Core（无头内核）✅ provider 抽象层 + 工具集 + 权限 + Agent loop
-  tui/      # Ink 终端界面 ✅ 接 core 事件流
-  app/      # Electron 桌面版（阶段二，待建）
+  core/     Provider、Agent loop、工具、权限、会话与 daemon
+  shared/   前端共享的纯逻辑：transcript 重建、Markdown 解析、行级 diff
+  tui/      基于 Ink 的终端界面
+  app/      基于 Electron 的桌面应用（ChatGPT 风格 UI + 插件市场）
+  vscode/   VSCode 扩展（侧边栏对话，agentx-vscode）
 ```
 
-## 进度（2026-07-13）
+三种前端（TUI / Electron / VSCode）都只依赖 core 的 `SessionHost` 契约；本地进程内、daemon socket、
+Electron IPC、VSCode webview postMessage 只是同一契约的不同「传输」实现，可互换。transcript / Markdown /
+diff 等前端无关的纯逻辑集中在 `@agentx/shared`，三端共用、单独测试。
 
-三层全部打通，10 个测试全绿，全仓类型检查 0 错误——**且全程未用任何真实 API key**（靠脚本化假 provider + 本地假 SSE 服务器验证）。
+当前全仓类型检查通过，离线测试 **core 134 + shared 6 + TUI 22 + app 16 + vscode 8，共 186 个**。测试不需要真实 API key。
 
-### 1. Provider 抽象层（`core/src/provider`、`types.ts`）
-统一消息模型（内容块数组）+ 流式事件通道 + registry。`AnthropicProvider` 和 `OpenAICompatProvider`（覆盖 OpenAI/Ollama/DeepSeek/vLLM/OpenRouter）。BYOK，密钥只读环境变量。
+## 先本地调试 TUI
 
-### 2. 工具集（`core/src/tools`）
-`read / write / edit / glob / grep / bash`。要点：
-- 所有路径经 `resolveInside()` 强制约束在 cwd 内（沙箱边界，防目录穿越）
-- `edit` 要求 old_string 唯一，否则报错（对齐 Claude Code 语义）
-- `bash` 带超时 + abort kill；`glob/grep` 自绕过 node_modules/.git
-- 每个工具自带 `readOnly` 标记和 `ruleKey()`，供权限引擎决策，无需硬编码工具名
-
-### 3. 权限系统（`core/src/permission.ts`）
-UI 无关。决策链：`bypass` → 只读工具 → allowRules（支持 `Bash(git *)` glob）→ `auto` → confirm 回调。`confirm` 是 core 与前端的唯一耦合点。支持"允许并记住"。
-
-### 4. Agent loop（`core/src/agent.ts`）
-把 provider + tools + permission 编织成循环，对外只暴露 `send(text) → AsyncGenerator<AgentEvent>`。事件流（`text/thinking/tool_start/tool_permission/tool_result/turn_end/done/error`）是 core 与所有前端的唯一契约。
-
-### 5. Ink TUI（`tui/src/app.tsx`）
-只做三件事：渲染事件流、收集输入、实现权限 confirm（把授权请求变成 y/a/n 交互）。用 `<Static>` 渲染已完成条目滚进终端历史，下方渲染实时流式文本。核心桥接：core 的异步 `confirm` 回调 → React state 上的 pending 请求 → 键盘 resolve。
-
-## 跑起来
+最短路径：
 
 ```bash
 npm install
-npm run typecheck            # 全仓，0 错误
-
-# 单测（无需 API key）
-cd packages/core && npm test # 8 个：registry/映射/agent loop/权限
-cd packages/tui  && node --import tsx --test 'src/**/*.test.tsx'  # 2 个：TUI 键入→授权→渲染
-
-# 真实运行 TUI（需配 key，或本地起 Ollama）
-export ANTHROPIC_API_KEY=sk-...
-cd packages/tui
-npm start -- --model anthropic/claude-opus-4-8
-npm start -- --model openai/gpt-5.2 --auto
-npm start -- --model ollama/qwen3 --cwd /some/project
+npm run dev:tui
 ```
 
-## 验证覆盖
+这个命令使用正式的 `debug/demo` provider，不访问网络、不需要 API key，并把开发数据隔离到：
 
-| 层 | 测试方式 | 结果 |
-|---|---|---|
-| provider registry / 消息结构 | 单测 | ✅ |
-| OpenAI 兼容层全链路 | 本地假 SSE 服务器（分片工具参数、tool_result 线格式、usage 映射） | ✅ |
-| Agent loop | 脚本化 provider：工具执行 / 权限拒绝 / 只读放行 / 收尾 | ✅ |
-| TUI 端到端 | ink-testing-library：键入→授权弹窗→批准→文件落盘→渲染 | ✅ |
+```text
+.agentx-dev/
+  sessions/       调试会话
+  tui.jsonl       调试日志
+```
 
-## 底层加固（2026-07-13，Fable 5 第二轮）
+普通文本会收到流式 echo。下面四条指令可以覆盖真实工具链路：
 
-逐文件复审 provider / compaction / 历史一致性 / 沙箱 / 存储，修复 5 处会造成 400、安全逃逸、成本浪费的真实缺陷：
+```text
+!todo       todo_write 与任务进度
+!write      写入 .agentx-debug.txt，并触发权限确认
+!bash       执行无害 printf，并触发权限确认
+!parallel   并行执行 glob + read 两个只读工具
+```
 
-| 缺陷 | 后果 | 修复 |
-|---|---|---|
-| Anthropic 只缓存 system，**对话历史无缓存断点** | 多轮 agent 每轮全价重算历史前缀（最大的成本漏洞） | 双断点：system（连带 tools）+ 最后一条消息（缓存对话前缀）；`buildAnthropicRequest` 抽成纯函数并用测试钉死断点位置 |
-| compaction 切割点可能落在 tool_result 上 | 保留窗口以孤儿 tool_result 开头 → provider 回放 **400** | `findSafeCutoff`：切割点必须是纯文本 user 消息；找不到则放弃压缩 |
-| 崩溃后 resume 历史以悬空 tool_call 结尾 | 下一次 send 必 **400** | `repairHistory` 自愈：补合成错误 tool_result 并落盘 |
-| 沙箱可被符号链接逃逸 | cwd 内一个指向外部的 symlink 即可读写任意文件 | `resolveInside` 加 realpath 校验（含新建文件的父链解析） |
-| `SessionStore.rewrite` 非原子 | compaction 重写中崩溃 → 会话文件损坏 | tmp + rename 原子写 |
+TUI 内可用命令：
 
-新增 12 个测试（缓存断点放置 ×4、compaction 边界 ×2、历史自愈 ×1、沙箱逃逸 ×5）。
+```text
+/help
+/status
+/providers
+/model                    # 打开内置模型选择器（↑/↓ 选择 · Enter 新建 · Esc 取消）
+/model <provider/model>   # 直接用目标模型新建会话，不热改旧会话
+/sessions
+/resume <sessionId>
+/new [标题]
+/exit
+```
 
----
+运行中按 Enter 可追加 steering 指令，按 Esc 中断。授权提示支持 `y` 允许、`a` 允许并记住、`n` 拒绝。
 
-## 架构重构（2026-07-13，Fable 5）
-
-用更强的模型重审了此前实现，发现并修复了几处**真正的架构缺陷**，把底层重做成产品级：
-
-### 核心弱点 → 修复
-
-| 旧问题 | 影响 | 现在 |
-|---|---|---|
-| daemon 的 `(live as any).__bindWrite` hack | 两连接驱动同一会话会互相覆盖，**破坏"共享会话/接管"** | 删除；改 pub/sub 广播 |
-| 事件只流向发起 send 的连接 | 第二个观察者什么都收不到 | subscribe 广播给**所有**订阅者 |
-| 无 subscribe/snapshot | 晚加入/重连拿不到状态 | open 立即回放 snapshot |
-| Agent `send` 可重入 | history 被并发破坏 | busy 护栏，重入抛错 |
-| `.bind(this) as any`、错位字段 | 类型 hack | 全部消除，`strict` 通过 |
-
-### 拱心石：`SessionHost` 接口 + pub/sub 总线
-
-- **`SessionManager`**（`core/src/session-manager.ts`）：每个会话一个广播源。`send` 驱动 Agent，事件广播给所有订阅者；权限请求作为会话事件广播，任一订阅者可裁决（permId = 工具调用 id，供 UI 关联）；`open` 立即回放 transcript+running 快照。
-- **`SessionHost`**（`core/src/host.ts`）：前端唯一面对的契约。两个等价实现——`LocalSessionHost`(进程内)和 `DaemonClient=RemoteSessionHost`(跨进程 socket)。**前端对传输无关,正如 core 对 UI 无关。**
-- daemon 变成 SessionManager 之上极薄的 socket 转发层,`server.ts` 从 ~200 行降到 ~120 行,逻辑全下沉到 manager——因此本地和远程行为天然一致。
-
-**验证**:daemon 测试真跑双客户端订阅同一会话,一个 send、另一个(纯观察)也收到完整事件流 + 权限广播;起独立 daemon 进程,RemoteSessionHost 跨进程建会话/订阅/列表全通。
-
-### TUI 接 SessionHost + 会话命令
-
-- `app.tsx` 只依赖 `SessionHost`,`cli.tsx` 默认 `LocalSessionHost`、`--daemon` 切 `RemoteSessionHost`,零改动 App。
-- 斜杠命令:`/sessions` 列会话 · `/resume <id>` 载入并**回显历史 transcript**续接 · `/new [标题]` · `/exit`。
-- `transcript.ts` 的 `messagesToItems` 把 snapshot.messages 还原成界面条目(resume 回显靠它)。
-
----
-
-## M2→M3 已完成（2026-07-13）
-
-四块全部实现并测试，全仓 **21 个测试全绿、0 类型错误**，仍旧全程无真实 API key。
-
-### 上下文管理（`core/src/context.ts`）
-- **项目记忆**：从 cwd 向上逐级收集 `AGENTS.md`/`CLAUDE.md`，止于 `.git` 边界，就近优先拼进 system 提示
-- **Compaction**：历史 token 估算超阈值时，把旧轮经 summarizer 压成一段摘要 + 保留最近 N 轮；summarizer 可注入（生产用小模型，测试用假实现，故可离线测）
-- 已集成进 Agent，每轮 provider 调用前自动检查
-
-### 会话持久化 + resume（`core/src/session.ts`）
-- `SessionStore`：每会话一个 JSONL 文件，meta 头行 + 逐条消息追加写（长会话不卡）
-- Agent 支持 `persistence`：每轮自动 append，compaction 后整文件 rewrite；`resumeMessages` 载入续接不重复写
-
-### 守护进程 / client-server（`core/src/daemon/`）
-- NDJSON over unix socket。`DaemonServer` 持有 Agent 实例，`DaemonClient` 供前端连接
-- **权限经协议回流**：core 的 confirm → `permission_request` 帧 → 客户端裁决 → 回传
-- 一个 daemon 可被 CLI + App 同时连，共享会话（App 阶段的复用基础）
-- 独立进程可跑：`npm run daemon --workspace @agentx/core`
-
-### MCP 客户端（`core/src/mcp.ts`）
-- 自研最小 stdio 客户端：JSON-RPC 2.0 + Content-Length 分帧，支持 initialize / tools.list / tools.call
-- 每个 MCP 工具包装成 core `Tool`（命名 `<server>__<tool>`，默认非只读走权限门），可直接挂进 Agent
-- 无外部依赖，用假 MCP server 脚本离线测试真实协议往返
-
-## 测试总览（38 全绿，0 类型错误，全程无真实 API key）
-
-| 包 | 测试数 | 覆盖 |
-|---|---|---|
-| core | 35 | provider 映射 + **缓存断点放置** / agent loop + 并发护栏 + **历史自愈** / 权限 / 上下文记忆 + **compaction 安全边界** / 会话持久化+resume / SessionManager 多订阅广播 / daemon 双客户端共享会话 / MCP 协议往返 / **沙箱逃逸（穿越+symlink）** |
-| tui | 3 | 键入→授权→落盘→渲染（走 SessionHost）/ /resume 回显历史 / /sessions 列会话 |
-
-## 运行
+安装 workspace 后也可以直接检查 CLI：
 
 ```bash
-npm install && npm run typecheck
-
-# TUI —— 进程内（默认）
-cd packages/tui && export ANTHROPIC_API_KEY=sk-...
-npm start -- --model anthropic/claude-opus-4-8
-npm start -- --resume <sessionId>            # 续接已有会话
-
-# TUI —— 连 daemon（跨进程共享会话）
-npm run daemon --workspace @agentx/core &     # 起守护进程
-npm start -- --daemon --model openai/gpt-5.2  # 另开 N 个前端连同一 daemon
+npm exec -- agentx --version
+npm exec -- agentx --list-providers
 ```
 
-## 下一步（阶段二）
+## 桌面应用（Electron）
 
-1. `core`: Skills 目录约定（SKILL.md）+ Hooks + Subagents
-2. `core`: 真沙箱（macOS seatbelt / Linux landlock）替换 bash 的原型级隔离
-3. `app`: Electron 壳复用 daemon（`RemoteSessionHost`）—— 多 agent worktree 并行、Review 队列、项目管理层。**接口已就绪,App 与 CLI 用同一个 `SessionHost`。**
+`packages/app` 是一个向 ChatGPT app 看齐的桌面客户端：左侧会话列表 + 新对话、中间气泡式
+对话与流式输出、底部输入框（Enter 发送 / Shift+Enter 换行）、可搜索的模型选择器、插件市场与设置页。
+
+架构上主进程内跑 core 的 `SessionManager`，经 `contextBridge`（`window.agentx`）把 `SessionHost`
+暴露给渲染进程——和 daemon 是同构的传输层。开箱即用默认零网络的 `debug/demo` 模型。
+
+```bash
+npm run dev:app      # 开发模式（electron-vite，热更新）
+npm run build:app    # 打包 main/preload/renderer 到 packages/app/out
+```
+
+功能亮点：
+
+- **对话与流式渲染**：气泡式界面，助手消息经内置轻量 Markdown 渲染（围栏代码块带复制按钮、
+  行内代码 / 粗体 / 链接 / 列表 / 标题），且绝不注入原始 HTML（无 XSS）。
+- **自动标题**：新会话发出首条消息后，用首句自动命名（离线、无需额外模型调用），持久化到会话文件。
+- **模型选择器**：复用内置免费 / 开源目录，主进程算好凭证就绪状态；可用的排前并标 ✔。
+- **自定义模型**：设置页可为任意已有 provider 追加模型（持久化到 `userData/models.json`），
+  立即出现在选择器里——回答了「模型是否只能写死在代码里」。
+- **会话管理**：侧边栏悬停即可删除会话（删除当前会话会自动切到最近一个或新建）。
+
+**插件市场 → 真实工具链**：插件统一抽象为可挂到 agent 的能力来源——内建工具（文件 / Bash / 任务清单）、
+MCP 服务（Web 搜索 / GitHub / Playwright）、技能。开关会真正改变 agent 拿到的工具集：停用内建工具组会
+从工具集移除对应工具；启用 MCP 且凭证就绪时连接 server 并注入其工具（`<name>__<tool>`），市场卡片显示连接
+状态。改动对新建会话生效，状态持久化到 `userData/plugins.json`。
+
+**打包分发**（electron-builder，主进程已把 core 与 SDK 依赖打进 bundle，产物自包含）：
+
+```bash
+npm run --workspace @agentx/app pack   # 快速产出未签名 .app（release/）
+npm run --workspace @agentx/app dist   # 产出安装包（dmg / nsis / AppImage）
+```
+
+## VSCode 扩展
+
+`packages/vscode`（`agentx-vscode`）把 agent 放进 VSCode 侧边栏，形态对齐 Claude 的编辑器扩展，
+功能对齐 TUI 主线：流式对话、工具调用、任务清单、内联授权（允许 / 允许并记住 / 拒绝）、Markdown 渲染。
+扩展主机进程内跑 core 的 `SessionManager`，webview 经 postMessage 通信——同一 `SessionHost` 契约的又一种传输。
+
+VSCode 味的取舍：模型选择与会话恢复/删除走**原生 QuickPick**（恢复列表带 🗑 删除按钮），**工作区目录即
+agent 的 cwd**，状态栏显示当前模型，首条消息后自动命名会话。开箱即用 `debug/demo`（零网络）。
+
+**文件改动 diff 预览**：agent 用 `write` / `edit` 改文件后，主机从会话消息里取工具参数算出行级 diff，
+在对话内以红绿行内联展示（带 +/- 统计与「打开文件」按钮，点开即在编辑器里查看）。
+
+```bash
+npm run build:vscode                       # esbuild 打包 out/extension.js 与 out/webview.js
+npm run package --workspace agentx-vscode  # 产出可安装的 agentx.vsix
+```
+
+在 VSCode 里以该目录为「扩展开发宿主」按 F5 即可调试。
+
+## Provider 与模型
+
+agentx 现在使用数据驱动 registry，模型字符串格式为 `provider/model`。首个 `/` 后面的内容会完整保留，因此 OpenRouter 这类带组织前缀的模型 id 可以直接使用。
+
+内置 canonical provider：
+
+| Provider | 协议/用途 | 凭证或端点变量 |
+|---|---|---|
+| `anthropic` | Anthropic Messages | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` |
+| `openai` | OpenAI Chat Completions | `OPENAI_API_KEY`, `OPENAI_BASE_URL` |
+| `openrouter` | OpenAI-compatible | `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` |
+| `deepseek` | OpenAI-compatible | `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` |
+| `gemini` | Gemini OpenAI compatibility | `GEMINI_API_KEY` 或 `GOOGLE_API_KEY`, `GEMINI_BASE_URL` |
+| `xai` | OpenAI-compatible | `XAI_API_KEY`, `XAI_BASE_URL` |
+| `groq` | OpenAI-compatible | `GROQ_API_KEY`, `GROQ_BASE_URL` |
+| `mistral` | OpenAI-compatible | `MISTRAL_API_KEY`, `MISTRAL_BASE_URL` |
+| `together` | OpenAI-compatible | `TOGETHER_API_KEY`, `TOGETHER_BASE_URL` |
+| `fireworks` | OpenAI-compatible | `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL` |
+| `cerebras` | OpenAI-compatible | `CEREBRAS_API_KEY`, `CEREBRAS_BASE_URL` |
+| `ollama` | 本地 OpenAI compatibility | `OLLAMA_BASE_URL`，默认 `127.0.0.1:11434/v1` |
+| `lmstudio` | 本地 OpenAI compatibility | `LMSTUDIO_BASE_URL`，默认 `127.0.0.1:1234/v1` |
+| `vllm` | 本地 OpenAI compatibility | `VLLM_BASE_URL`，默认 `127.0.0.1:8000/v1` |
+| `llamacpp` | 本地 OpenAI compatibility | `LLAMACPP_BASE_URL`，默认 `127.0.0.1:8080/v1` |
+| `custom` | 自定义 OpenAI-compatible 服务 | `CUSTOM_OPENAI_BASE_URL`, `CUSTOM_OPENAI_API_KEY` |
+| `debug` | 零网络调试 | 无 |
+
+别名包括 `demo`、`lm-studio`、`llama.cpp`。
+
+### 内置免费 / 开源模型（供调试）
+
+registry 自带一份可直接选用的模型目录，重点收录**免费额度或本地推理的开放权重模型**，
+方便零成本调试 agent loop。在 TUI 里输入 `/model`（不带参数）即弹出选择器：可用（本地/免 key/已配置凭证）的排在前面并标 `✔`，缺凭证的标 `✖` 并提示需要设置的环境变量。
+
+- **零网络**：`debug/demo` —— 永远可用，离线流式 echo，支持 `!todo/!write/!bash/!parallel` 驱动真实工具链路。
+- **免费云端额度**：OpenRouter `:free` 变体（DeepSeek R1、Llama 3.3 70B、Qwen2.5 72B、Gemma 2、Mistral 7B）、Groq（Llama 3.3 70B / 3.1 8B、DeepSeek R1 Distill、Gemma 2）、Cerebras（Llama 3.3 70B / 3.1 8B）。
+- **本地推理**：Ollama（`qwen2.5-coder`、`llama3.2`、`deepseek-r1`，需先 `ollama pull`）。
+- **开放权重直连**：DeepSeek 官方（`deepseek-chat` / `deepseek-reasoner`）。
+
+命令行查看完整目录：
+
+```bash
+npm run start --workspace @agentx/tui -- --list-models
+```
+
+查看本机可用配置：
+
+```bash
+npm run start --workspace @agentx/tui -- --list-providers
+```
+
+真实模型示例：
+
+```bash
+# Anthropic
+export ANTHROPIC_API_KEY=...
+npm run start --workspace @agentx/tui -- --model anthropic/<model-id>
+
+# OpenRouter：model id 中的 slash 会保留
+export OPENROUTER_API_KEY=...
+npm run start --workspace @agentx/tui -- --model openrouter/anthropic/<model-id>
+
+# Ollama
+npm run start --workspace @agentx/tui -- --model ollama/qwen3
+
+# 任意自建 OpenAI-compatible endpoint
+export CUSTOM_OPENAI_BASE_URL=http://127.0.0.1:9000/v1
+export CUSTOM_OPENAI_API_KEY=...
+npm run start --workspace @agentx/tui -- --model custom/<model-id>
+```
+
+云端 provider 缺少自己的 key 时会在进入 TUI 前给出明确诊断。第三方兼容端点不会回退或继承 OpenAI SDK 的 API/admin key、组织、项目及环境自定义 header。
+
+### 自定义兼容 Provider
+
+上层配置或插件可以程序化注册：
+
+```ts
+import { registerOpenAICompatibleProvider } from "@agentx/core";
+
+registerOpenAICompatibleProvider({
+  id: "my-gateway",
+  name: "My Gateway",
+  baseURL: "https://gateway.example/v1",
+  apiKeyEnv: "MY_GATEWAY_API_KEY",
+  maxTokensField: "max_tokens",
+  streamUsage: false,
+  reasoningEffort: false,
+  capabilities: { tools: true, reasoning: false },
+});
+```
+
+不同兼容端点可以分别配置 `max_tokens` / `max_completion_tokens`、`stream_options`、`reasoning_effort`、headers、能力和上下文限制。Provider SDK 的内部重试默认关闭，统一由 Agent 层处理，避免一次失败被两层重试放大。
+
+### 与 OpenCode 的范围差异
+
+当前架构已经能接入原生 Anthropic、主流 OpenAI-compatible 云端和本地模型，并可继续注册自定义端点；但还不是 OpenCode 所使用的完整 AI SDK + Models.dev 生态。自动模型目录、动态能力发现、OpenAI Responses API，以及少数 provider 的专有协议仍属于后续阶段。参考：[OpenCode Providers](https://opencode.ai/docs/providers/)、[Gemini OpenAI compatibility](https://ai.google.dev/gemini-api/docs/openai)、[OpenRouter API](https://openrouter.ai/docs/api/reference/overview)。
+
+## Core 已具备的能力
+
+- 统一内容块消息与流式事件协议，支持文本、thinking、图片、并行工具调用和 usage。
+- Agent loop：工具执行、steering、重试、hooks、skills、subagents、todo 与中断。
+- 模型能力驱动请求：按 profile 控制 tools、reasoning、输出上限和 compaction 阈值；未知兼容模型不会被强塞 16k 输出参数。
+- 子 agent 的 `provider/model` override 会重新解析 provider，不再错误复用父 provider。
+- 默认工具：`read / write / edit / glob / grep / bash / todo_write / task / skill`。
+- 权限模式：`default / acceptEdits / auto / bypass`，支持 allow/ask/deny glob 规则和运行时记忆。
+- 项目记忆：向上发现 `AGENTS.md` / `CLAUDE.md`，止于 `.git` 边界。
+- 两级 compaction：先清理旧工具输出，再在安全边界生成摘要，保持 tool call/result 配对。
+- JSONL 会话持久化、resume、最近活跃排序、悬空工具调用自愈。
+- `SessionHost` 抽象与 daemon pub/sub：本地 TUI 和远程客户端使用同一接口，多客户端可观察、接管和裁决权限。
+- 最小 MCP stdio 客户端。
+
+## TUI 参数
+
+```text
+--demo
+--model <provider/model>
+--cwd <dir>
+--sessions <dir>
+--resume <sessionId>
+--auto
+--accept-edits
+--daemon [socket]
+--debug-log [file]
+--trace-content
+--list-providers
+--help
+--version
+```
+
+参数解析是严格的：未知参数、缺值、重复和互斥组合会直接报错。`--sessions` 与权限模式属于本地进程，daemon 客户端不能覆盖 daemon 的配置。
+
+`--debug-log` 写权限为 `0600` 的 JSONL 文件，不向 stdout 输出日志以免破坏 Ink。默认只记录事件类型、耗时和内容长度，不记录 prompt、工具参数、错误原文或输出；只有显式传 `--trace-content` 才记录内容，凭证样式仍会脱敏。
+
+## Daemon
+
+```bash
+# 终端 1
+npm run daemon --workspace @agentx/core -- --accept-edits
+
+# 终端 2
+npm run start --workspace @agentx/tui -- --daemon --model openai/<model-id>
+
+# 恢复共享会话
+npm run start --workspace @agentx/tui -- --daemon --resume <sessionId>
+```
+
+权限请求和裁决会广播给所有观察者；一个客户端处理后，其他 TUI 会同步清除提示。`open` 会先交付 snapshot，再按序回放响应飞行期间的事件。长 snapshot 会按受限 NDJSON 帧传输；非法/过大的客户端帧只关闭对应连接，不会击穿 daemon。
+
+## 验证
+
+```bash
+npm run typecheck
+npm test
+```
+
+当前覆盖 138 个离线测试，包括 provider 映射和真实本地 SSE/HTTP header fixture、工具调用、重试、权限、hooks、skills、subagents、compaction、沙箱路径检查、私有会话权限、会话竞态、daemon 多客户端与大快照，以及 Ink TUI 交互。
+
+## 采各家之所长（对标 Claude Code / Codex / opencode / Aider·Cline 的增强）
+
+- **小模型路由（Claude Code）**：摘要压缩等杂活自动走便宜快速模型（`SessionManagerOptions.smallModel: true` 按 provider 推导，如 anthropic→haiku、groq→llama-3.1-8b），解析失败静默回退主模型。省这类调用 70–80% 成本。见 `provider/registry.ts` 的 `defaultSmallModel`、`agent.ts` 的 `streamText`。
+- **编辑自愈 + 反射（Aider/Cline）**：`edit` 精确匹配失败时退到「按行去空白」的模糊匹配；全都匹配不上则抛出附「文件中最接近片段」的反射式错误，让模型据此自我纠正（Aider 经验：关掉自愈编辑错误率数倍上升）。见 `tools/fs.ts` 的 `applyEdit`。
+- **macOS 沙箱第一阶段（Codex/Claude Code）**：bash 可选用 Seatbelt `sandbox-exec` 包裹——只放行「工作区 + 临时目录」写入、默认断网，纵深防御 prompt 注入。opt-in：`AGENTX_BASH_SANDBOX=workspace-write`（或 `SessionManagerOptions.sandbox`）。非 macOS 自动裸跑。见 `tools/sandbox.ts`。已实测：越界写被拒、出网被拒、工作区内写正常。
+
+## 安全边界与下一步
+
+路径工具会阻止 `..` 和符号链接逃逸；shell 权限会保守解析复合命令；macOS 上可开启 Seatbelt 沙箱（见上）。后续：Linux bubblewrap/Landlock、以及「先沙箱后询问、撞墙才升级」的 Codex 双轴审批闭环。
+
+后续优先级（据架构评审）：
+
+1. OS 沙箱补齐 Linux + 双轴审批（sandbox-first, approve-on-failure）。
+2. LSP 诊断反馈回路 / 工作区检查点（shadow-git undo）/ Plan 模式。
+3. daemon 升级为 HTTP+SSE + OpenAPI 生成 SDK。
+4. 结构化 headless 输出、延迟工具加载（ToolSearch）。

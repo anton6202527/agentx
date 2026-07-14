@@ -30,21 +30,32 @@ import { emptyUsage } from "../types.js";
 export interface AnthropicProviderOptions {
   apiKey?: string;
   baseURL?: string;
+  /** 仅对明确支持 adaptive thinking 的模型返回 true；未知模型默认关闭。 */
+  adaptiveThinking?: boolean | ((model: string) => boolean);
+  /** SDK 内层重试默认关闭，由 Agent 统一处理。 */
+  maxRetries?: number;
 }
 
 export class AnthropicProvider implements Provider {
   readonly name = "anthropic";
   private client: Anthropic;
+  private readonly adaptiveThinking: AnthropicProviderOptions["adaptiveThinking"];
 
   constructor(opts: AnthropicProviderOptions = {}) {
     this.client = new Anthropic({
-      ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
-      ...(opts.baseURL ? { baseURL: opts.baseURL } : {}),
+      ...(opts.apiKey !== undefined ? { apiKey: opts.apiKey } : {}),
+      ...(opts.baseURL !== undefined ? { baseURL: opts.baseURL } : {}),
+      maxRetries: opts.maxRetries ?? 0,
     });
+    this.adaptiveThinking = opts.adaptiveThinking;
   }
 
   async *stream(req: StreamRequest): AsyncIterable<StreamEvent> {
-    const stream = this.client.messages.stream(buildAnthropicRequest(req), {
+    const adaptiveThinking =
+      typeof this.adaptiveThinking === "function"
+        ? this.adaptiveThinking(req.model)
+        : (this.adaptiveThinking ?? false);
+    const stream = this.client.messages.stream(buildAnthropicRequest(req, { adaptiveThinking }), {
       ...(req.signal ? { signal: req.signal } : {}),
     });
 
@@ -101,6 +112,7 @@ export class AnthropicProvider implements Provider {
 
 export function buildAnthropicRequest(
   req: StreamRequest,
+  options: { adaptiveThinking?: boolean } = {},
 ): Anthropic.MessageStreamParams {
   const messages = req.messages.map(toAnthropicMessage);
   markLastMessageCache(messages);
@@ -108,8 +120,10 @@ export function buildAnthropicRequest(
   return {
     model: req.model,
     max_tokens: req.maxTokens ?? 32000,
-    thinking: { type: "adaptive" },
-    ...(req.effort ? { output_config: { effort: req.effort } } : {}),
+    ...(options.adaptiveThinking ? { thinking: { type: "adaptive" as const } } : {}),
+    ...(options.adaptiveThinking && req.effort
+      ? { output_config: { effort: req.effort } }
+      : {}),
     ...(req.system
       ? {
           system: [

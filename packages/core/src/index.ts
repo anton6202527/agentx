@@ -1,16 +1,72 @@
 export * from "./types.js";
-export { AnthropicProvider } from "./provider/anthropic.js";
-export { OpenAICompatProvider } from "./provider/openai-compat.js";
-export { createProvider, registerProvider, listProviders } from "./provider/registry.js";
+export {
+  AnthropicProvider,
+  buildAnthropicRequest,
+  type AnthropicProviderOptions,
+} from "./provider/anthropic.js";
+export {
+  OpenAICompatProvider,
+  type OpenAICompatOptions,
+  type MaxTokensField,
+} from "./provider/openai-compat.js";
+export { DebugProvider, type DebugProviderOptions } from "./provider/debug.js";
+export {
+  createProvider,
+  diagnoseProvider,
+  registerProvider,
+  registerOpenAICompatibleProvider,
+  listProviders,
+  listProviderDetails,
+  listModelCatalog,
+  defaultSmallModel,
+  type ProviderKind,
+  type ProviderProtocol,
+  type ProviderCapabilities,
+  type ProviderLimits,
+  type ProviderModelProfile,
+  type ProviderCatalogEntry,
+  type ModelCatalogEntry,
+  type ProviderDescriptor,
+  type ProviderModelInfo,
+  type ProviderDiagnostics,
+  type ResolvedModel,
+  type CreatedModel,
+  type OpenAICompatibleProviderRegistration,
+} from "./provider/registry.js";
 
 export {
   Agent,
   repairHistory,
   type AgentEvent,
   type AgentOptions,
+  type AgentModelInfo,
+  type AgentResolvedModel,
   type PersistenceConfig,
   type AgentSnapshot,
+  type RetryConfig,
 } from "./agent.js";
+export {
+  HookRunner,
+  type HookEventName,
+  type HookPayload,
+  type HookResult,
+  type HookHandler,
+  type HookRegistration,
+  type HookOutcome,
+} from "./hooks.js";
+export {
+  createTaskTool,
+  GENERAL_SUBAGENT,
+  type SubagentDefinition,
+  type TaskToolOptions,
+} from "./subagent.js";
+export { Chan } from "./chan.js";
+export {
+  discoverSkills,
+  skillListPrompt,
+  createSkillTool,
+  type SkillMeta,
+} from "./skills.js";
 export {
   SessionManager,
   type SessionManagerOptions,
@@ -38,6 +94,7 @@ export {
   composeSystem,
   estimateTokens,
   maybeCompact,
+  microcompact,
   providerSummarizer,
   type CompactionConfig,
   type CompactionResult,
@@ -45,6 +102,7 @@ export {
 } from "./context.js";
 export {
   PermissionEngine,
+  globMatch,
   type PermissionConfig,
   type PermissionDecision,
   type PermissionRequest,
@@ -65,4 +123,14 @@ export {
   globTool,
   grepTool,
   bashTool,
+  splitShellCommand,
+  analyzeShellCommand,
+  type ShellCommandAnalysis,
+  createTodoTool,
+  type TodoItem,
+  type SandboxPolicy,
+  type SandboxSpec,
+  wrapWithSandbox,
+  buildSeatbeltProfile,
+  resolveSandboxPolicy,
 } from "./tools/index.js";

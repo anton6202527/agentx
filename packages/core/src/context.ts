@@ -89,6 +89,8 @@ export interface CompactionConfig {
   triggerTokens?: number;
   /** 压缩后保留的最近轮数（一轮 = 一个 user + 后续 assistant/tool 往返） */
   keepRecentMessages?: number;
+  /** microcompaction 保留原文的最近 tool_result 个数（默认 5） */
+  keepToolResults?: number;
   summarizer: Summarizer;
 }
 
@@ -120,10 +122,49 @@ function findSafeCutoff(history: ChatMessage[], desired: number): number | null 
   return null;
 }
 
+const CLEARED_PLACEHOLDER = "[旧工具结果已清理以释放上下文]";
+
 /**
- * 若 history 估算超阈值，则：
- *   [旧消息] → summarizer 摘要成一条 assistant「上下文摘要」消息，
- *   接上最近若干条原文（从安全边界起，见 findSafeCutoff）。
+ * Microcompaction（第一级压缩，对齐 Claude Code 的 "clears older tool outputs first"）：
+ * 把较旧的 tool_result 内容替换为占位符，只保留最近 keepRecent 个结果原文。
+ * 关键不变量：tool_use/tool_result 的配对结构原样保留 —— 只清内容不动骨架，
+ * 回放永远合法。比全量摘要便宜（无需模型调用），先试它。
+ */
+export function microcompact(
+  history: ChatMessage[],
+  keepRecent = 5,
+): { messages: ChatMessage[]; cleared: number } {
+  const qualifies = (p: ContentPart): p is Extract<ContentPart, { type: "tool_result" }> =>
+    p.type === "tool_result" && p.content.length > 200 && p.content !== CLEARED_PLACEHOLDER;
+
+  let total = 0;
+  for (const m of history) for (const p of m.content) if (qualifies(p)) total++;
+  const toClear = Math.max(0, total - keepRecent);
+  if (toClear === 0) return { messages: history, cleared: 0 };
+
+  let cleared = 0;
+  const messages = history.map((m) => {
+    if (m.role !== "user" || cleared >= toClear || !m.content.some((p) => qualifies(p))) return m;
+    return {
+      ...m,
+      content: m.content.map((p) => {
+        if (cleared < toClear && qualifies(p)) {
+          cleared++;
+          return { ...p, content: CLEARED_PLACEHOLDER };
+        }
+        return p;
+      }),
+    };
+  });
+  return { messages, cleared };
+}
+
+/**
+ * 两级压缩。超阈值时：
+ *   L1 microcompaction —— 清旧 tool_result 为占位符（保配对结构），若已回到阈值
+ *      八成以下则到此为止（省一次摘要调用）；
+ *   L2 全量摘要 —— [旧消息] → summarizer 摘要成一条 assistant「上下文摘要」消息，
+ *      接上最近若干条原文（从安全边界起，见 findSafeCutoff）。
  * 否则原样返回。
  *
  * 保证：
@@ -134,20 +175,40 @@ export async function maybeCompact(
   history: ChatMessage[],
   cfg: CompactionConfig,
 ): Promise<CompactionResult> {
+  const original = history;
   const trigger = cfg.triggerTokens ?? 120_000;
   const keep = cfg.keepRecentMessages ?? 6;
   const before = estimateTokens(history);
 
-  if (before < trigger || history.length <= keep + 2) {
+  if (before < trigger) {
     return { messages: history, compacted: false, beforeTokens: before, afterTokens: before };
+  }
+
+  // L1：microcompaction
+  const micro = microcompact(history, cfg.keepToolResults ?? 5);
+  if (micro.cleared > 0) {
+    const afterMicro = estimateTokens(micro.messages);
+    if (afterMicro <= trigger * 0.8) {
+      return { messages: micro.messages, compacted: true, beforeTokens: before, afterTokens: afterMicro };
+    }
+    history = micro.messages; // 保留窗口可用清理版；摘要输入仍必须用 original
+  }
+
+  if (history.length <= keep + 2) {
+    // 短历史做不了摘要；若 micro 有斩获也算一次有效压缩
+    const after = estimateTokens(history);
+    return { messages: history, compacted: micro.cleared > 0, beforeTokens: before, afterTokens: after };
   }
 
   const cutoff = findSafeCutoff(history, history.length - keep);
   if (cutoff === null || cutoff === 0) {
-    // 没有安全切割点（如整段都是一个超长工具往返），放弃本次压缩
-    return { messages: history, compacted: false, beforeTokens: before, afterTokens: before };
+    // 没有安全切割点（如整段都是一个超长工具往返），放弃摘要；micro 的斩获仍生效
+    const after = estimateTokens(history);
+    return { messages: history, compacted: micro.cleared > 0, beforeTokens: before, afterTokens: after };
   }
-  const older = history.slice(0, cutoff);
+  // 摘要必须看到原始旧历史；若拿 microcompact 后的占位符去摘要，会永久丢掉
+  // 正是摘要最该保留的旧工具结论。结构相同，因此 cutoff 可安全复用。
+  const older = original.slice(0, cutoff);
   const recent = history.slice(cutoff);
 
   const summary = await cfg.summarizer(older);

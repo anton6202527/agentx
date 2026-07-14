@@ -91,3 +91,26 @@ test("thinking 回放: 无 signature 的块被剔除，有 signature 的保留",
   assert.deepEqual(kinds, ["thinking", "text"]); // 只剩带签名的那条 + 文本
   assert.equal(assistant.content[0].signature, "s1");
 });
+
+test("adaptive thinking: 未明确支持的模型默认不发送", () => {
+  const req = buildAnthropicRequest({
+    model: "private-or-legacy-model",
+    messages: [{ role: "user", content: [{ type: "text", text: "问" }] }],
+    effort: "high",
+  });
+  assert.equal(req.thinking, undefined);
+  assert.equal(req.output_config, undefined);
+});
+
+test("adaptive thinking: profile 明确允许时才发送 thinking 与 effort", () => {
+  const req = buildAnthropicRequest(
+    {
+      model: "claude-opus-4-8",
+      messages: [{ role: "user", content: [{ type: "text", text: "问" }] }],
+      effort: "high",
+    },
+    { adaptiveThinking: true },
+  );
+  assert.deepEqual(req.thinking, { type: "adaptive" });
+  assert.deepEqual(req.output_config, { effort: "high" });
+});

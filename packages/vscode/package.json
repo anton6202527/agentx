@@ -1,0 +1,54 @@
+{
+  "name": "agentx-vscode",
+  "displayName": "agentx",
+  "description": "agentx —— 在 VSCode 侧边栏里与自研 coding agent 对话（复用 @agentx/core）",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "agentx",
+  "author": "agentx",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["AI", "Chat", "Programming Languages"],
+  "main": "./out/extension.js",
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "vscode:prepublish": "node esbuild.mjs --production",
+    "package": "vsce package --no-dependencies -o agentx.vsix",
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "activationEvents": ["onView:agentx.chat"],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "agentx", "title": "agentx", "icon": "media/icon.svg" }
+      ]
+    },
+    "views": {
+      "agentx": [
+        { "id": "agentx.chat", "name": "对话", "type": "webview" }
+      ]
+    },
+    "commands": [
+      { "command": "agentx.newSession", "title": "agentx: 新对话", "icon": "$(add)" },
+      { "command": "agentx.pickModel", "title": "agentx: 选择模型", "icon": "$(list-selection)" },
+      { "command": "agentx.resume", "title": "agentx: 恢复会话", "icon": "$(history)" },
+      { "command": "agentx.focus", "title": "agentx: 打开对话面板" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "agentx.newSession", "when": "view == agentx.chat", "group": "navigation@1" },
+        { "command": "agentx.pickModel", "when": "view == agentx.chat", "group": "navigation@2" },
+        { "command": "agentx.resume", "when": "view == agentx.chat", "group": "navigation@3" }
+      ]
+    }
+  },
+  "dependencies": {
+    "@agentx/core": "*",
+    "@agentx/shared": "*"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.28.0"
+  }
+}

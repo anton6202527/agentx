@@ -50,6 +50,10 @@ function rel(cwd: string, abs: string): string {
   return path.relative(cwd, abs) || ".";
 }
 
+function ensureActive(ctx: ToolContext): void {
+  if (ctx.signal.aborted) throw new ToolError("会话已中断，文件操作未执行");
+}
+
 export const readTool: Tool = {
   readOnly: true,
   def: {
@@ -68,6 +72,7 @@ export const readTool: Tool = {
   },
   ruleKey: (i) => String(i["path"] ?? ""),
   async run(input, ctx: ToolContext) {
+    ensureActive(ctx);
     const abs = await resolveInside(ctx.cwd, input["path"]);
     let content: string;
     try {
@@ -89,6 +94,7 @@ export const readTool: Tool = {
 
 export const writeTool: Tool = {
   readOnly: false,
+  mutatesFiles: true,
   def: {
     name: "write",
     description: "创建或完全覆盖一个文件。父目录会自动创建。",
@@ -104,9 +110,12 @@ export const writeTool: Tool = {
   },
   ruleKey: (i) => String(i["path"] ?? ""),
   async run(input, ctx) {
+    ensureActive(ctx);
     const abs = await resolveInside(ctx.cwd, input["path"]);
     const content = String(input["content"] ?? "");
+    ensureActive(ctx);
     await fs.mkdir(path.dirname(abs), { recursive: true });
+    ensureActive(ctx);
     await fs.writeFile(abs, content, "utf8");
     return `已写入 ${rel(ctx.cwd, abs)}（${content.length} 字符）`;
   },
@@ -114,6 +123,7 @@ export const writeTool: Tool = {
 
 export const editTool: Tool = {
   readOnly: false,
+  mutatesFiles: true,
   def: {
     name: "edit",
     description:
@@ -132,6 +142,7 @@ export const editTool: Tool = {
   },
   ruleKey: (i) => String(i["path"] ?? ""),
   async run(input, ctx) {
+    ensureActive(ctx);
     const abs = await resolveInside(ctx.cwd, input["path"]);
     const oldStr = String(input["old_string"] ?? "");
     const newStr = String(input["new_string"] ?? "");
@@ -144,16 +155,121 @@ export const editTool: Tool = {
     } catch (e: any) {
       throw new ToolError(`读取失败: ${e?.code ?? e}`);
     }
-    const count = content.split(oldStr).length - 1;
-    if (count === 0) throw new ToolError("未找到 old_string，无法替换");
-    if (count > 1 && !replaceAll) {
-      throw new ToolError(`old_string 出现 ${count} 次，不唯一；请扩大上下文或用 replace_all`);
-    }
-    const updated = replaceAll ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
+
+    const { updated, replaced, mode } = applyEdit(content, oldStr, newStr, replaceAll);
+    ensureActive(ctx);
     await fs.writeFile(abs, updated, "utf8");
-    return `已修改 ${rel(ctx.cwd, abs)}（替换 ${replaceAll ? count : 1} 处）`;
+    // mode=fuzzy 时提示模型这次靠空白容差匹配上了，下次可给更精确的 old_string。
+    const note = mode === "fuzzy" ? "（按空白容差匹配）" : "";
+    return `已修改 ${rel(ctx.cwd, abs)}（替换 ${replaced} 处${note ? " " + note : ""}）`;
   },
 };
+
+/**
+ * 应用一次编辑：先精确匹配，失败再退到「按行去除首尾空白」的模糊匹配。
+ * 都失败则抛出带「最接近片段」的反射式错误，让模型据此自我纠正（Aider 的关键经验：
+ * 关掉这类自愈会让编辑错误率数倍上升）。
+ */
+export function applyEdit(
+  content: string,
+  oldStr: string,
+  newStr: string,
+  replaceAll: boolean,
+): { updated: string; replaced: number; mode: "exact" | "fuzzy" } {
+  const exact = content.split(oldStr).length - 1;
+  if (exact === 1 || (exact > 1 && replaceAll)) {
+    const updated = replaceAll ? content.split(oldStr).join(newStr) : content.replace(oldStr, newStr);
+    return { updated, replaced: replaceAll ? exact : 1, mode: "exact" };
+  }
+  if (exact > 1 && !replaceAll) {
+    throw new ToolError(`old_string 出现 ${exact} 次，不唯一；请扩大上下文（多带几行）或用 replace_all`);
+  }
+
+  // exact === 0：按行去空白模糊定位。
+  const spans = locateFuzzy(content, oldStr);
+  if (spans.length === 1 || (spans.length > 1 && replaceAll)) {
+    // 从后往前替换，避免前面的替换改动后续 span 的偏移。
+    let updated = content;
+    const targets = replaceAll ? [...spans].reverse() : [spans[0]!];
+    for (const s of targets) updated = updated.slice(0, s.start) + newStr + updated.slice(s.end);
+    return { updated, replaced: targets.length, mode: "fuzzy" };
+  }
+  if (spans.length > 1 && !replaceAll) {
+    throw new ToolError(
+      `old_string 按空白容差匹配到 ${spans.length} 处，不唯一；请扩大上下文或用 replace_all`,
+    );
+  }
+
+  const near = nearestSnippet(content, oldStr);
+  throw new ToolError(
+    "未找到 old_string（精确与空白容差均未命中）。" +
+      (near
+        ? `\n文件中最接近的片段是：\n<<<<<<<\n${near}\n>>>>>>>\n请据此修正 old_string 后重试。`
+        : "请确认路径与内容，或先用 read 查看当前文件。"),
+  );
+}
+
+/** 按行匹配：忽略每行首尾空白；返回命中在原文中的字符区间（保留原始缩进作被替换段）。 */
+function locateFuzzy(content: string, oldStr: string): { start: number; end: number }[] {
+  const oldLines = oldStr.split("\n").map((l) => l.trim());
+  const lines = content.split("\n");
+  const offsets: number[] = [];
+  let pos = 0;
+  for (const line of lines) {
+    offsets.push(pos);
+    pos += line.length + 1; // +1 为换行符
+  }
+  const n = oldLines.length;
+  const spans: { start: number; end: number }[] = [];
+  for (let i = 0; i + n <= lines.length; i++) {
+    let ok = true;
+    for (let j = 0; j < n; j++) {
+      if (lines[i + j]!.trim() !== oldLines[j]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) {
+      const last = i + n - 1;
+      spans.push({ start: offsets[i]!, end: offsets[last]! + lines[last]!.length });
+    }
+  }
+  return spans;
+}
+
+/** 找出与 old_string 首行最相似的行，返回其起始的等长窗口，供反射式错误展示。 */
+function nearestSnippet(content: string, oldStr: string): string | null {
+  const anchor = oldStr.split("\n").map((l) => l.trim()).find(Boolean);
+  if (!anchor) return null;
+  const lines = content.split("\n");
+  const n = oldStr.split("\n").length;
+  let best = { sim: 0, i: 0 };
+  for (let i = 0; i < lines.length; i++) {
+    const sim = diceSimilarity(lines[i]!.trim(), anchor);
+    if (sim > best.sim) best = { sim, i };
+  }
+  if (best.sim < 0.4) return null; // 太不相似就别误导模型
+  return lines.slice(best.i, best.i + n).join("\n");
+}
+
+/** Sørensen–Dice 二元组相似度（0~1），用于"你是不是想找这段"的模糊定位。 */
+function diceSimilarity(a: string, b: string): number {
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+  const grams = (s: string): Map<string, number> => {
+    const m = new Map<string, number>();
+    for (let i = 0; i < s.length - 1; i++) {
+      const g = s.slice(i, i + 2);
+      m.set(g, (m.get(g) ?? 0) + 1);
+    }
+    return m;
+  };
+  const ga = grams(a);
+  const gb = grams(b);
+  let overlap = 0;
+  for (const [g, count] of ga) overlap += Math.min(count, gb.get(g) ?? 0);
+  return (2 * overlap) / (a.length - 1 + (b.length - 1));
+}
 
 // ---------- Glob ----------
 
