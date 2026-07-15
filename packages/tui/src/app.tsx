@@ -1344,7 +1344,7 @@ function InputPanel({
     </Text>
   );
 
-  // 输入行
+  // 输入行内容（不含左侧竖条）：前导空格 + 文本/占位 + 光标。inputW 含前导空格。
   let inputNode: React.ReactNode;
   let inputW: number;
   if (text) {
@@ -1354,55 +1354,64 @@ function InputPanel({
     if (at) {
       inputNode = (
         <>
+          {" "}
           {before}
           {cursorCell(at)}
           {text.slice(c + 1)}
         </>
       );
-      inputW = dispWidth(text);
+      inputW = 1 + dispWidth(text);
     } else {
       inputNode = (
         <>
+          {" "}
           {before}
           {cursorCell(" ")}
         </>
       );
-      inputW = dispWidth(text) + 1;
+      inputW = 1 + dispWidth(text) + 1;
     }
   } else {
     inputNode = (
       <>
+        {" "}
         {cursorCell(" ")}
         <Text color="#9a9a9a">{PANEL_PLACEHOLDER}</Text>
       </>
     );
-    inputW = 1 + dispWidth(PANEL_PLACEHOLDER);
+    inputW = 1 + 1 + dispWidth(PANEL_PLACEHOLDER);
   }
-  const inputUsed = 2 + inputW; // "▌ "
 
   // 模型行
   const metaPlain = ` ${spinner} ${model} · ${basename(cwd)}${title ? ` · ${truncate(title, 20)}` : ""}`;
   const metaUsed = dispWidth(metaPlain);
 
+  // 每行统一：细竖条(▏, 宽 1) + 内容 + 补白；竖条贯穿整块高度（对齐 opencode）。
+  const bar = <Text color={barColor}>▏</Text>;
+  const rowLine = (content: React.ReactNode, used: number) => (
+    <Text backgroundColor={PANEL_BG}>
+      {bar}
+      {content}
+      {pad(width, 1 + used)}
+    </Text>
+  );
+
   return (
     <Box flexDirection="column" width={width}>
-      <Text backgroundColor={PANEL_BG}>{pad(width, 0)}</Text>
-      <Text backgroundColor={PANEL_BG}>
-        <Text color={barColor}>▌</Text>
-        {" "}
-        {inputNode}
-        {pad(width, inputUsed)}
-      </Text>
-      <Text backgroundColor={PANEL_BG}>{pad(width, 0)}</Text>
-      <Text backgroundColor={PANEL_BG}>
-        {" "}
-        <Text color={running ? "yellow" : PANEL_BAR}>{spinner}</Text>{" "}
-        <Text color="white">{model}</Text>
-        <Text color="#9a9a9a"> · {basename(cwd)}</Text>
-        {title ? <Text color="#9a9a9a"> · {truncate(title, 20)}</Text> : null}
-        {pad(width, metaUsed)}
-      </Text>
-      <Text backgroundColor={PANEL_BG}>{pad(width, 0)}</Text>
+      {rowLine(null, 0)}
+      {rowLine(inputNode, inputW)}
+      {rowLine(null, 0)}
+      {rowLine(
+        <>
+          {" "}
+          <Text color={running ? "yellow" : PANEL_BAR}>{spinner}</Text>{" "}
+          <Text color="white">{model}</Text>
+          <Text color="#9a9a9a"> · {basename(cwd)}</Text>
+          {title ? <Text color="#9a9a9a"> · {truncate(title, 20)}</Text> : null}
+        </>,
+        metaUsed,
+      )}
+      {rowLine(null, 0)}
     </Box>
   );
 }

@@ -30,21 +30,39 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export async function ensureOllama(
   base = process.env["OLLAMA_BASE_URL"] || DEFAULT_BASE,
-  timeoutMs = 8000,
+  timeoutMs = 15000,
 ): Promise<"running" | "started" | "missing" | "timeout"> {
   if (await ollamaLive(base)) return "running";
-  try {
-    const child = spawn("ollama", ["serve"], { detached: true, stdio: "ignore" });
-    child.unref();
-    child.on("error", () => {}); // 未安装时的 ENOENT 由下方轮询兜底
-  } catch {
-    return "missing";
-  }
+
+  // 拉起 `ollama serve`：靠 'spawn' / 'error' 事件区分「成功启动」与「命令不存在」，
+  // 不再把 ENOENT 误判成超时。
+  const spawned = await new Promise<boolean>((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn("ollama", ["serve"], { detached: true, stdio: "ignore" });
+    } catch {
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    child.once("error", () => done(false)); // ENOENT：未安装
+    child.once("spawn", () => {
+      child.unref();
+      done(true);
+    });
+    setTimeout(() => done(true), 800); // 两事件都没来时的兜底
+  });
+  if (!spawned) return "missing";
+
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await delay(300);
     if (await ollamaLive(base)) return "started";
   }
-  // 轮询期间若 spawn 因 ENOENT 直接失败，端点永远起不来 → 判为未安装/超时。
-  return (await ollamaLive(base)) ? "started" : "timeout";
+  return "timeout";
 }
