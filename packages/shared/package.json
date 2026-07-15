@@ -1,5 +1,5 @@
 {
-  "name": "@agentx/shared",
+  "name": "@anicode/shared",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -12,6 +12,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@agentx/core": "*"
+    "@anicode/core": "*"
   }
 }

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import type { ProviderDescriptor, SessionSummary } from "@agentx/core";
+import type { ProviderDescriptor, SessionSummary } from "@anicode/core";
 import type { AppInfo, ModelRow, PluginEntry, UserModel } from "../../shared/api.js";
 import { Sidebar, type View } from "./components/Sidebar.js";
 import { ChatView } from "./components/ChatView.js";
@@ -34,7 +34,7 @@ export function App() {
 
   const refreshSessions = useCallback(async () => {
     try {
-      setSessions(await window.agentx.listSessions());
+      setSessions(await window.anicode.listSessions());
     } catch (err) {
       setBanner(errorMessage(err));
     }
@@ -44,7 +44,7 @@ export function App() {
     async (model: string): Promise<string | null> => {
       if (!appInfo) return null;
       try {
-        const meta = await window.agentx.createSession({ cwd: appInfo.cwd, model });
+        const meta = await window.anicode.createSession({ cwd: appInfo.cwd, model });
         setCurrentModel(model);
         setCurrentId(meta.id);
         setView("chat");
@@ -64,11 +64,11 @@ export function App() {
     void (async () => {
       try {
         const [info, cat, provs, plugs, ums] = await Promise.all([
-          window.agentx.appInfo(),
-          window.agentx.listModelCatalog(),
-          window.agentx.listProviders(),
-          window.agentx.listPlugins(),
-          window.agentx.listUserModels(),
+          window.anicode.appInfo(),
+          window.anicode.listModelCatalog(),
+          window.anicode.listProviders(),
+          window.anicode.listPlugins(),
+          window.anicode.listUserModels(),
         ]);
         if (cancelled) return;
         setAppInfo(info);
@@ -76,7 +76,7 @@ export function App() {
         setProviders(provs);
         setPlugins(plugs);
         setUserModels(ums);
-        const meta = await window.agentx.createSession({ cwd: info.cwd, model: DEFAULT_MODEL });
+        const meta = await window.anicode.createSession({ cwd: info.cwd, model: DEFAULT_MODEL });
         if (cancelled) return;
         setCurrentId(meta.id);
         void refreshSessions();
@@ -91,11 +91,11 @@ export function App() {
 
   const sendAndMaybeTitle = useCallback(
     (id: string, text: string, isFirst: boolean) => {
-      void window.agentx
+      void window.anicode
         .send(id, text)
         .then(() => {
           // 首条消息 + 无标题 → 自动用首句生成标题（离线、无需额外模型调用）。
-          if (isFirst) return window.agentx.setTitle(id, deriveTitle(text)).then(() => refreshSessions());
+          if (isFirst) return window.anicode.setTitle(id, deriveTitle(text)).then(() => refreshSessions());
           return undefined;
         })
         .catch((err) => setBanner(errorMessage(err)));
@@ -119,7 +119,7 @@ export function App() {
   );
 
   const onInterrupt = useCallback(() => {
-    if (currentId) void window.agentx.interrupt(currentId).catch(() => {});
+    if (currentId) void window.anicode.interrupt(currentId).catch(() => {});
   }, [currentId]);
 
   const onSelectSession = useCallback((s: SessionSummary) => {
@@ -131,12 +131,12 @@ export function App() {
   const onDeleteSession = useCallback(
     async (id: string) => {
       try {
-        await window.agentx.deleteSession(id);
+        await window.anicode.deleteSession(id);
       } catch (err) {
         setBanner(errorMessage(err));
         return;
       }
-      const remaining = await window.agentx.listSessions();
+      const remaining = await window.anicode.listSessions();
       setSessions(remaining);
       // 删掉的是当前会话 → 切到其余最近一个，没有则新建。
       if (id === currentId) {
@@ -149,22 +149,22 @@ export function App() {
   );
 
   const onTogglePlugin = useCallback((id: string, enabled: boolean) => {
-    void window.agentx
+    void window.anicode
       .setPluginEnabled(id, enabled)
       .then(setPlugins)
       .catch((err) => setBanner(errorMessage(err)));
   }, []);
 
   const onAddUserModel = useCallback(async (model: UserModel) => {
-    const rows = await window.agentx.addUserModel(model);
+    const rows = await window.anicode.addUserModel(model);
     setCatalog(rows);
-    setUserModels(await window.agentx.listUserModels());
+    setUserModels(await window.anicode.listUserModels());
   }, []);
 
   const onRemoveUserModel = useCallback(async (spec: string) => {
-    const rows = await window.agentx.removeUserModel(spec);
+    const rows = await window.anicode.removeUserModel(spec);
     setCatalog(rows);
-    setUserModels(await window.agentx.listUserModels());
+    setUserModels(await window.anicode.listUserModels());
   }, []);
 
   const modelLabel = catalog.find((r) => r.spec === currentModel)?.label ?? currentModel;

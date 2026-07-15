@@ -9,12 +9,12 @@ import { daemonHelpText, parseDaemonArgs, removeStaleSocket } from "./launch.js"
 test("daemon CLI: 严格解析路径、权限与帮助参数", () => {
   const args = parseDaemonArgs([
     "--socket",
-    "./tmp/agentx.sock",
+    "./tmp/anicode.sock",
     "--sessions",
     "./tmp/sessions",
     "--accept-edits",
   ]);
-  assert.match(args.socketPath, /tmp\/agentx\.sock$/);
+  assert.match(args.socketPath, /tmp\/anicode\.sock$/);
   assert.match(args.sessionsDir, /tmp\/sessions$/);
   assert.equal(args.permissionMode, "acceptEdits");
   assert.match(daemonHelpText(), /agentx-daemon 0\.0\.1/);

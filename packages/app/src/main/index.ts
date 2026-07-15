@@ -2,7 +2,7 @@
  * Electron 主进程入口。
  *
  * 职责：创建窗口、在主进程内启动 core（经 Bridge 暴露给渲染进程）、管理生命周期。
- * 真正的会话逻辑全在 @agentx/core；主进程只做窗口与传输。
+ * 真正的会话逻辑全在 @anicode/core；主进程只做窗口与传输。
  */
 
 import * as path from "node:path";

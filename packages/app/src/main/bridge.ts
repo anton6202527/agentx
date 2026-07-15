@@ -1,5 +1,5 @@
 /**
- * IPC 桥：把主进程里的 core（SessionManager）暴露成 window.agentx。
+ * IPC 桥：把主进程里的 core（SessionManager）暴露成 window.anicode。
  *
  * 与 daemon/server.ts 同构 —— 都是 SessionHost 的一种传输实现。这里额外承载
  * provider/模型目录查询与插件市场状态的读写。
@@ -16,9 +16,10 @@ import {
   diagnoseProvider,
   listModelCatalog,
   listProviderDetails,
+  probeLocalProviders,
   type OpenHandle,
   type PermissionDecisionKind,
-} from "@agentx/core";
+} from "@anicode/core";
 import { applyPluginToggle, PLUGIN_CATALOG, type PluginEntry } from "../shared/plugins.js";
 import type { AppInfo, ModelRow, UserModel } from "../shared/api.js";
 import { PluginRuntime, type McpConnector } from "./plugin-runtime.js";
@@ -47,7 +48,7 @@ function resolveConfiguredProvider(model: string) {
   return createProvider(model);
 }
 
-const EVENT_CHANNEL = "agentx:event";
+const EVENT_CHANNEL = "anicode:event";
 
 export class Bridge {
   private readonly manager: SessionManager;
@@ -128,9 +129,14 @@ export class Bridge {
 
   /** 主进程能读 env，这里算好每个模型的凭证就绪状态再下发给渲染进程；含内置目录 + 用户自定义。 */
   private async catalogRows(): Promise<ModelRow[]> {
-    const builtin: ModelRow[] = listModelCatalog().map((entry) => this.toRow(entry, "builtin"));
+    // 本地 provider「免 key」不等于「在跑」；探测存活，避免把连不上的本地模型标成就绪。
+    const details = listProviderDetails();
+    const probed = new Set(details.filter((d) => d.local && (d.baseURL || d.baseURLEnv)).map((d) => d.id));
+    const live = await probeLocalProviders(details);
+    const status = { probed, live };
+    const builtin: ModelRow[] = listModelCatalog().map((entry) => this.toRow(entry, "builtin", status));
     const userRows = (await this.readUserModels()).flatMap((m) => {
-      const row = this.userModelToRow(m);
+      const row = this.userModelToRow(m, status);
       return row ? [row] : [];
     });
     // 用户自定义排在前面，便于快速切到自己常用的调试模型。
@@ -152,21 +158,32 @@ export class Bridge {
       note?: string;
     },
     source: "builtin" | "user",
+    status: { probed: Set<string>; live: Set<string> },
   ): ModelRow {
     const d = diagnoseProvider(entry.spec);
-    const ready = !d.requiresApiKey || d.hasCredentials;
-    const readyHint = !d.requiresApiKey
-      ? entry.local
-        ? "本地 / 免 key"
-        : "免 key"
-      : d.hasCredentials
+    let ready: boolean | undefined;
+    let readyHint: string;
+    if (status.probed.has(entry.providerId)) {
+      // 有本地端点的 provider：以存活探测为准，别被「免 key」误导。
+      ready = status.live.has(entry.providerId);
+      readyHint = ready ? `${entry.providerName} 已就绪` : `需先启动 ${entry.providerName}`;
+    } else if (!d.requiresApiKey) {
+      ready = true;
+      readyHint = entry.local ? "本地 / 免 key" : "免 key";
+    } else {
+      ready = d.hasCredentials;
+      readyHint = d.hasCredentials
         ? `${d.credentialEnv ?? "凭证"} 已配置`
         : `缺 ${d.apiKeyEnv.join(" / ") || "API key"}`;
+    }
     return { ...entry, ready, readyHint, source };
   }
 
   /** 把用户模型解析成目录行；provider 不存在则丢弃（返回 null）。 */
-  private userModelToRow(m: UserModel): ModelRow | null {
+  private userModelToRow(
+    m: UserModel,
+    status: { probed: Set<string>; live: Set<string> },
+  ): ModelRow | null {
     const descriptor = listProviderDetails().find((p) => p.id === m.provider);
     if (!descriptor) return null;
     return this.toRow(
@@ -183,6 +200,7 @@ export class Bridge {
         ...(m.note ? { note: m.note } : {}),
       },
       "user",
+      status,
     );
   }
 

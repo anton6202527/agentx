@@ -5,7 +5,7 @@ import type {
   PermissionDecisionKind,
   SessionEvent,
   SessionHost,
-} from "@agentx/core";
+} from "@anicode/core";
 
 const SECRET_PATTERNS = [
   /\b(sk-[A-Za-z0-9_-]{8,})\b/g,

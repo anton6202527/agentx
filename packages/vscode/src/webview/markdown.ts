@@ -1,9 +1,9 @@
 /**
- * 把 @agentx/shared 的 Markdown AST 渲染成 DOM（textContent/createElement，无 innerHTML → 无 XSS）。
+ * 把 @anicode/shared 的 Markdown AST 渲染成 DOM（textContent/createElement，无 innerHTML → 无 XSS）。
  * 解析逻辑共享，渲染各前端各自实现。
  */
 
-import { parseMarkdown, type MdBlock, type Span } from "@agentx/shared";
+import { parseMarkdown, type MdBlock, type Span } from "@anicode/shared";
 
 export function renderMarkdown(container: HTMLElement, text: string): void {
   for (const block of parseMarkdown(text)) container.append(renderBlock(block));

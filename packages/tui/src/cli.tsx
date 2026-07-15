@@ -25,15 +25,19 @@ import {
   LocalSessionHost,
   DaemonClient,
   type SessionHost,
-} from "@agentx/core";
+} from "@anicode/core";
 import { App } from "./app.js";
 import { DebugLogger, withDebugLogging } from "./debug-log.js";
 
-const CLI_VERSION = "0.0.1";
-const DEFAULT_MODEL = "anthropic/claude-opus-4-8";
+const CLI_VERSION = "0.1.0";
+// 默认走 DeepSeek 开放模型；真正生效值由 resolveDefaultModel 在运行时按凭证/本地服务挑选
+// （无 DeepSeek key 时优雅回退，见 resolveDefaultModel）。
+const DEFAULT_MODEL = "deepseek/deepseek-chat";
 
 export interface CliArgs {
   model: string;
+  /** 用户是否显式传了 --model；否则运行时按已配置凭证挑默认模型。 */
+  modelExplicit: boolean;
   cwd: string;
   resume?: string;
   daemon: boolean;
@@ -64,8 +68,8 @@ export function parseArgs(argv: string[]): CliArgs {
   let cwd = process.cwd();
   let resume: string | undefined;
   let daemon = false;
-  let socket = path.join(os.tmpdir(), "agentx.sock");
-  let sessionsDir = path.join(os.homedir(), ".agentx", "sessions");
+  let socket = path.join(os.tmpdir(), "anicode.sock");
+  let sessionsDir = path.join(os.homedir(), ".anicode", "sessions");
   let sessionsExplicit = false;
   let demo = false;
   let help = false;
@@ -141,7 +145,7 @@ export function parseArgs(argv: string[]): CliArgs {
           debugLog = path.resolve(next);
           i++;
         } else {
-          debugLog = path.resolve(".agentx-dev", "tui.jsonl");
+          debugLog = path.resolve(".anicode-dev", "tui.jsonl");
         }
         break;
       }
@@ -177,6 +181,7 @@ export function parseArgs(argv: string[]): CliArgs {
 
   return {
     model,
+    modelExplicit: seen.has("--model"),
     cwd,
     ...(resume ? { resume } : {}),
     daemon,
@@ -195,10 +200,10 @@ export function parseArgs(argv: string[]): CliArgs {
 }
 
 export function helpText(): string {
-  return `agentx ${CLI_VERSION}\n\n` +
-    `用法: agentx [选项]\n\n` +
+  return `anicode ${CLI_VERSION}\n\n` +
+    `用法: anicode [选项]\n\n` +
     `  --demo                    使用零 Key 的确定性调试模型\n` +
-    `  --model <provider/model>  选择模型（默认 ${DEFAULT_MODEL}）\n` +
+    `  --model <provider/model>  选择模型（不指定则自动挑已配置凭证的 provider，都没有则用零 Key 的 debug/demo）\n` +
     `  --cwd <dir>               Agent 工作目录\n` +
     `  --sessions <dir>          本地会话目录\n` +
     `  --resume <id>             恢复已有会话\n` +
@@ -228,6 +233,67 @@ export function validateArgs(args: CliArgs): void {
       `${flag} 不能用于 --daemon 客户端：权限策略由 daemon 进程统一决定。` +
         `请在启动 agentx-daemon 时传入 ${flag}；已运行 daemon 的策略不会被当前连接修改。`,
     );
+  }
+}
+
+/**
+ * 未显式指定模型时的默认：优先挑一个「已配置凭证」的云端 provider，
+ * 都没有就回退零网络的 debug/demo —— 于是 `animecode`（无 key、无参数）能像 opencode
+ * 一样直接进 TUI，再用 /model 选免费/本地模型或配置密钥。绝不因缺 ANTHROPIC_API_KEY 而退出。
+ */
+// 偏好开源 DeepSeek 优先，再退到其它已配置的云端；本地 Ollama 由 detectLocalModel 单独探测。
+const DEFAULT_MODEL_PREFERENCES = [
+  "opencode/big-pickle", // OpenCode Zen 免费（需 OPENCODE_API_KEY）
+  "deepseek/deepseek-chat", // 开源，DeepSeek 官方直连
+  "openrouter/deepseek/deepseek-r1:free", // 开源，OpenRouter 免费额度
+  "groq/deepseek-r1-distill-llama-70b", // 开源，Groq 免费档
+  "openrouter/meta-llama/llama-3.3-70b-instruct:free", // 开源
+  "anthropic/claude-opus-4-8",
+  "openai/gpt-5",
+  "gemini/gemini-2.5-pro",
+  "xai/grok-3",
+];
+
+export function resolveDefaultModel(): string {
+  for (const spec of DEFAULT_MODEL_PREFERENCES) {
+    try {
+      const d = diagnoseProvider(spec);
+      // 只在凭证已就绪时选云端；本地 provider（ollama 等）无法确认在跑，改由 detectLocalModel 探测。
+      if (d.requiresApiKey && d.hasCredentials) return spec;
+    } catch {
+      /* 未知 spec，跳过 */
+    }
+  }
+  return "debug/demo";
+}
+
+/**
+ * 探测本地 Ollama：在跑就返回一个可用模型 spec（优先 deepseek），否则 null。
+ * 这样 `animecode`（无 Key）在装了 Ollama 且拉过 deepseek-r1 时，默认就是真正免费开源的 DeepSeek。
+ * 失败/超时/未运行一律静默返回 null（回退云端偏好或 debug/demo）。
+ */
+export async function detectLocalModel(
+  fetchImpl: typeof fetch = fetch,
+  baseUrl = process.env["OLLAMA_BASE_URL"] || "http://127.0.0.1:11434/v1",
+): Promise<string | null> {
+  const host = baseUrl.replace(/\/v1\/?$/, "");
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 400);
+    let res: Response;
+    try {
+      res = await fetchImpl(`${host}/api/tags`, { signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) return null;
+    const data = (await res.json()) as { models?: { name?: string }[] };
+    const names = (data.models ?? []).map((m) => m.name).filter((n): n is string => Boolean(n));
+    if (names.length === 0) return null;
+    const deepseek = names.find((n) => /deepseek/i.test(n));
+    return `ollama/${deepseek ?? names[0]}`;
+  } catch {
+    return null;
   }
 }
 
@@ -317,7 +383,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
-  // 校验 provider（本地模式下尽早报错）
+  // 未显式指定模型时挑默认：本地 Ollama（优先 DeepSeek，真正零 Key 免费开源）→
+  // 已配置凭证的云端（DeepSeek 优先）→ 零网络 debug/demo。绝不因缺 ANTHROPIC_API_KEY 报错退出。
+  if (!args.modelExplicit && !args.demo) {
+    args.model = (await detectLocalModel()) ?? resolveDefaultModel();
+  }
+
+  // 校验 provider（本地模式下尽早报错）。仅当用户显式选了缺 key 的模型才会抛错。
   if (!args.daemon && !args.resume) {
     try {
       // 这里只做无副作用诊断；真正创建 provider 由 createSession 唯一执行。
@@ -355,6 +427,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         providers={listProviderDetails()}
         catalog={listModelCatalog()}
         inspectProviderCredentials={!args.daemon}
+        version={CLI_VERSION}
       />,
     );
     await instance.waitUntilExit();

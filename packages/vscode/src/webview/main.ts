@@ -4,7 +4,7 @@
  * 所有模型输出都用 textContent/DOM 构建，绝不用 innerHTML，天然无 XSS。
  */
 
-import type { SessionEvent, TodoItem, Usage } from "@agentx/core";
+import type { SessionEvent, TodoItem, Usage } from "@anicode/core";
 import type { FileChange, HostToWebview, PendingPerm, SessionInfo } from "../protocol.js";
 import { messagesToItems, todosFromMessages, firstLine, type Item } from "../transcript.js";
 import { renderMarkdown } from "./markdown.js";

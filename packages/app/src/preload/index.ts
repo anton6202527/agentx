@@ -6,7 +6,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { AgentxApi, EventEnvelope } from "../shared/api.js";
 
-const EVENT_CHANNEL = "agentx:event";
+const EVENT_CHANNEL = "anicode:event";
 
 const api: AgentxApi = {
   appInfo: () => ipcRenderer.invoke("app:info"),

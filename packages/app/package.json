@@ -1,8 +1,8 @@
 {
-  "name": "@agentx/app",
+  "name": "@anicode/app",
   "version": "0.0.1",
   "private": true,
-  "description": "agentx 桌面应用（Electron）—— ChatGPT 风格界面 + 插件市场，复用 @agentx/core",
+  "description": "anicode 桌面应用（Electron）—— ChatGPT 风格界面 + 插件市场，复用 @anicode/core",
   "author": "agentx",
   "main": "out/main/index.js",
   "scripts": {
@@ -15,8 +15,8 @@
     "dist": "electron-vite build && electron-builder"
   },
   "build": {
-    "appId": "dev.agentx.app",
-    "productName": "agentx",
+    "appId": "dev.anicode.app",
+    "productName": "anicode",
     "electronVersion": "43.1.0",
     "directories": {
       "output": "release",
@@ -38,8 +38,8 @@
     }
   },
   "dependencies": {
-    "@agentx/core": "*",
-    "@agentx/shared": "*"
+    "@anicode/core": "*",
+    "@anicode/shared": "*"
   },
   "devDependencies": {
     "@types/react": "^18.3.0",

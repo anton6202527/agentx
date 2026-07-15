@@ -1,10 +1,10 @@
 /**
- * 把 @agentx/shared 的 Markdown AST 渲染成 React 元素（不用 dangerouslySetInnerHTML，无 XSS）。
+ * 把 @anicode/shared 的 Markdown AST 渲染成 React 元素（不用 dangerouslySetInnerHTML，无 XSS）。
  * 解析逻辑共享，渲染在各前端各自实现。
  */
 
 import React, { useState } from "react";
-import { parseMarkdown, type MdBlock, type Span } from "@agentx/shared";
+import { parseMarkdown, type MdBlock, type Span } from "@anicode/shared";
 
 export function Markdown({ text }: { text: string }) {
   return <>{parseMarkdown(text).map((block, i) => renderBlock(block, i))}</>;

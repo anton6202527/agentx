@@ -1,16 +1,17 @@
 {
-  "name": "agentx",
+  "name": "anicode-monorepo",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "dev:tui": "tsx packages/tui/src/cli.tsx --demo --cwd . --sessions .agentx-dev/sessions --debug-log .agentx-dev/tui.jsonl",
-    "dev:app": "npm run dev --workspace @agentx/app",
-    "build:app": "npm run build --workspace @agentx/app",
-    "build:vscode": "npm run build --workspace agentx-vscode",
+    "dev:tui": "tsx packages/tui/src/cli.tsx --demo --cwd . --sessions .anicode-dev/sessions --debug-log .anicode-dev/tui.jsonl",
+    "build:cli": "npm run build --workspace anicode",
+    "dev:app": "npm run dev --workspace @anicode/app",
+    "build:app": "npm run build --workspace @anicode/app",
+    "build:vscode": "npm run build --workspace anicode-vscode",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"
   },

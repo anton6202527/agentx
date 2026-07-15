@@ -1,5 +1,5 @@
 /**
- * 主进程 ↔ 渲染进程之间的契约（contextBridge 暴露到 window.agentx）。
+ * 主进程 ↔ 渲染进程之间的契约（contextBridge 暴露到 window.anicode）。
  *
  * 这是 Electron 版的「传输层」：和 daemon 一样，它只是 SessionHost 的另一种搬运方式。
  * 渲染进程据此在本地重建一个 SessionHost 交给 UI，UI 对传输一无所知。
@@ -12,7 +12,7 @@ import type {
   SessionEvent,
   SessionSnapshot,
   SessionSummary,
-} from "@agentx/core";
+} from "@anicode/core";
 import type { PluginEntry } from "./plugins.js";
 
 export type { PluginEntry } from "./plugins.js";
@@ -94,6 +94,6 @@ export interface AgentxApi {
 
 declare global {
   interface Window {
-    agentx: AgentxApi;
+    anicode: AgentxApi;
   }
 }

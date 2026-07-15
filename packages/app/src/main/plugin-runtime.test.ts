@@ -5,7 +5,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { McpClient, McpServerConfig, Tool } from "@agentx/core";
+import type { McpClient, McpServerConfig, Tool } from "@anicode/core";
 import { PluginRuntime, type McpConnector } from "./plugin-runtime.js";
 
 function fakeTool(name: string): Tool {

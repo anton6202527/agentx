@@ -1,11 +1,11 @@
 {
-  "name": "agentx-vscode",
-  "displayName": "agentx",
-  "description": "agentx —— 在 VSCode 侧边栏里与自研 coding agent 对话（复用 @agentx/core）",
+  "name": "anicode-vscode",
+  "displayName": "anicode",
+  "description": "anicode —— 在 VSCode 侧边栏里与自研 coding agent 对话（复用 @anicode/core）",
   "version": "0.0.1",
   "private": true,
-  "publisher": "agentx",
-  "author": "agentx",
+  "publisher": "anicode",
+  "author": "anicode",
   "engines": { "vscode": "^1.85.0" },
   "categories": ["AI", "Chat", "Programming Languages"],
   "main": "./out/extension.js",
@@ -13,39 +13,39 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "vscode:prepublish": "node esbuild.mjs --production",
-    "package": "vsce package --no-dependencies -o agentx.vsix",
+    "package": "vsce package --no-dependencies -o anicode.vsix",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
-  "activationEvents": ["onView:agentx.chat"],
+  "activationEvents": ["onView:anicode.chat"],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
-        { "id": "agentx", "title": "agentx", "icon": "media/icon.svg" }
+        { "id": "anicode", "title": "anicode", "icon": "media/icon.svg" }
       ]
     },
     "views": {
-      "agentx": [
-        { "id": "agentx.chat", "name": "对话", "type": "webview" }
+      "anicode": [
+        { "id": "anicode.chat", "name": "对话", "type": "webview" }
       ]
     },
     "commands": [
-      { "command": "agentx.newSession", "title": "agentx: 新对话", "icon": "$(add)" },
-      { "command": "agentx.pickModel", "title": "agentx: 选择模型", "icon": "$(list-selection)" },
-      { "command": "agentx.resume", "title": "agentx: 恢复会话", "icon": "$(history)" },
-      { "command": "agentx.focus", "title": "agentx: 打开对话面板" }
+      { "command": "anicode.newSession", "title": "anicode: 新对话", "icon": "$(add)" },
+      { "command": "anicode.pickModel", "title": "anicode: 选择模型", "icon": "$(list-selection)" },
+      { "command": "anicode.resume", "title": "anicode: 恢复会话", "icon": "$(history)" },
+      { "command": "anicode.focus", "title": "anicode: 打开对话面板" }
     ],
     "menus": {
       "view/title": [
-        { "command": "agentx.newSession", "when": "view == agentx.chat", "group": "navigation@1" },
-        { "command": "agentx.pickModel", "when": "view == agentx.chat", "group": "navigation@2" },
-        { "command": "agentx.resume", "when": "view == agentx.chat", "group": "navigation@3" }
+        { "command": "anicode.newSession", "when": "view == anicode.chat", "group": "navigation@1" },
+        { "command": "anicode.pickModel", "when": "view == anicode.chat", "group": "navigation@2" },
+        { "command": "anicode.resume", "when": "view == anicode.chat", "group": "navigation@3" }
       ]
     }
   },
   "dependencies": {
-    "@agentx/core": "*",
-    "@agentx/shared": "*"
+    "@anicode/core": "*",
+    "@anicode/shared": "*"
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",

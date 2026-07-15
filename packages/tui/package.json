@@ -1,25 +1,31 @@
 {
-  "name": "@agentx/tui",
-  "version": "0.0.1",
-  "private": true,
+  "name": "anicode",
+  "version": "0.1.0",
+  "description": "anicode —— 前端无关的自研 AI coding agent 的终端界面（TUI）",
   "type": "module",
   "bin": {
-    "agentx": "./bin/agentx.mjs"
+    "anicode": "./dist/cli.mjs"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "start": "tsx src/cli.tsx",
+    "build": "node esbuild.mjs",
+    "prepublishOnly": "node esbuild.mjs --production",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test 'src/**/*.test.tsx'"
   },
   "dependencies": {
-    "@agentx/core": "*",
-    "@agentx/shared": "*",
     "ink": "^5.1.0",
-    "react": "^18.3.1",
-    "tsx": "^4.19.0"
+    "react": "^18.3.1"
   },
   "devDependencies": {
+    "@anicode/core": "*",
+    "@anicode/shared": "*",
     "@types/react": "^18.3.0",
-    "ink-testing-library": "^4.0.0"
+    "esbuild": "^0.28.0",
+    "ink-testing-library": "^4.0.0",
+    "tsx": "^4.19.0"
   }
 }

@@ -17,7 +17,7 @@ import {
   type McpServerConfig,
   type Tool,
   type ToolRegistry,
-} from "@agentx/core";
+} from "@anicode/core";
 import {
   mergePluginState,
   type PluginEntry,

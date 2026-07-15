@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { ChatMessage } from "@agentx/core";
+import type { ChatMessage } from "@anicode/core";
 import { fileChangeFor } from "./filechange.js";
 
 function toolMsg(id: string, name: string, args: Record<string, unknown>): ChatMessage {

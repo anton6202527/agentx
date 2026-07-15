@@ -9,6 +9,7 @@
 
 import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { Box, Text, Static, useApp, useInput } from "ink";
+import { probeLocalProviders } from "@anicode/core";
 import type {
   ChatMessage,
   ModelCatalogEntry,
@@ -19,7 +20,7 @@ import type {
   SessionSummary,
   TodoItem,
   Usage,
-} from "@agentx/core";
+} from "@anicode/core";
 import { messagesToItems, todosFromMessages, firstLine, truncate, type Item } from "./transcript.js";
 
 interface State {
@@ -127,6 +128,9 @@ function reducer(s: State, a: Action): State {
 
 const emptyUsage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 
+/** 品牌名（欢迎页 logo 与状态栏）。 */
+export const APP_NAME = "anicode";
+
 interface PendingPerm {
   permId: string;
   toolName: string;
@@ -144,6 +148,8 @@ export interface AppProps {
   catalog?: readonly ModelCatalogEntry[];
   /** 仅本地 host 可安全读取当前进程 env；daemon 的凭证属于服务端进程。 */
   inspectProviderCredentials?: boolean;
+  /** CLI 版本号，显示在底部状态栏。 */
+  version?: string;
 }
 
 export function App({
@@ -154,6 +160,7 @@ export function App({
   providers = [],
   catalog = [],
   inspectProviderCredentials = false,
+  version = "0.0.1",
 }: AppProps) {
   const { exit } = useApp();
   const [sessionId, setSessionId] = useState(initialId);
@@ -178,8 +185,8 @@ export function App({
   // 权限请求队列：并行只读工具可能同时产生多个 ask（如 askRules 命中），逐个裁决
   const [pendings, setPendings] = useState<PendingPerm[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
-  // /model 选择器：非空即打开，index 为高亮项。
-  const [picker, setPicker] = useState<{ rows: PickerRow[]; index: number } | null>(null);
+  // /model 选择器：非空即打开，index 为高亮项，filter 为搜索词。
+  const [picker, setPicker] = useState<{ rows: PickerRow[]; index: number; filter: string } | null>(null);
   const closeRef = useRef<(() => void) | null>(null);
 
   const selectModel = useCallback(
@@ -294,14 +301,18 @@ export function App({
       if (cmd === "model") {
         const spec = rest[0];
         if (!spec) {
-          // 不带参数：打开内置模型选择器（含免费/开源模型）。
-          const rows = buildPickerRows(catalog, providers, inspectProviderCredentials);
+          // 不带参数：打开内置模型选择器（含免费/开源模型）。本地 provider 先探测存活，
+          // 免得把没启动的 Ollama/LM Studio 标成就绪、选中后 Connection error。
+          const liveLocal = inspectProviderCredentials
+            ? await probeLive(providers)
+            : undefined;
+          const rows = buildPickerRows(catalog, providers, inspectProviderCredentials, liveLocal);
           if (rows.length === 0) {
             dispatch({ t: "push", item: { kind: "error", text: "内置模型目录为空；用 /model <provider/model> 指定" } });
             return true;
           }
           setSessions(null);
-          setPicker({ rows, index: 0 });
+          setPicker({ rows, index: 0, filter: "" });
           return true;
         }
         await selectModel(spec);
@@ -360,21 +371,35 @@ export function App({
   );
 
   useInput((ch, key) => {
+    // Ctrl+Z 退出（与 Ctrl+C 一致）；raw 模式下 Ctrl+Z 可能是 "z" 或 SUB 字符。
+    if (key.ctrl && (ch === "z" || ch === "\u001a")) {
+      exit();
+      return;
+    }
     if (picker) {
+      const visible = filterPickerRows(picker.rows, picker.filter);
       if (key.escape) {
         setPicker(null);
         return;
       }
-      if (key.upArrow || ch === "k") {
-        setPicker((p) => (p ? { ...p, index: (p.index - 1 + p.rows.length) % p.rows.length } : p));
+      if (key.upArrow) {
+        setPicker((p) => {
+          if (!p) return p;
+          const n = filterPickerRows(p.rows, p.filter).length || 1;
+          return { ...p, index: (p.index - 1 + n) % n };
+        });
         return;
       }
-      if (key.downArrow || ch === "j") {
-        setPicker((p) => (p ? { ...p, index: (p.index + 1) % p.rows.length } : p));
+      if (key.downArrow) {
+        setPicker((p) => {
+          if (!p) return p;
+          const n = filterPickerRows(p.rows, p.filter).length || 1;
+          return { ...p, index: (p.index + 1) % n };
+        });
         return;
       }
       if (key.return) {
-        const spec = picker.rows[picker.index]?.spec;
+        const spec = visible[picker.index]?.spec;
         if (spec) {
           void selectModel(spec).catch((err) => {
             setPicker(null);
@@ -383,7 +408,16 @@ export function App({
         }
         return;
       }
-      return; // 选择器打开时吞掉其余按键，避免误入输入框
+      if (key.backspace || key.delete) {
+        setPicker((p) => (p ? { ...p, filter: p.filter.slice(0, -1), index: 0 } : p));
+        return;
+      }
+      // 可打印字符 → 追加到搜索词并回到首行。
+      if (ch && !key.ctrl && !key.meta && !key.tab) {
+        setPicker((p) => (p ? { ...p, filter: p.filter + ch, index: 0 } : p));
+        return;
+      }
+      return;
     }
     const pending = pendings[0];
     if (pending) {
@@ -468,21 +502,18 @@ export function App({
   });
 
   const u = state.usage;
+  const conversationEmpty =
+    !state.items.some((i) => i.kind === "user" || i.kind === "assistant" || i.kind === "tool") &&
+    !state.liveText &&
+    state.activeTools.size === 0;
+
   return (
     <Box flexDirection="column">
-      <Box flexDirection="column" borderStyle="single" borderColor="gray" paddingX={1}>
-        <Text>
-          <Text color="green" bold>agentx</Text>
-          <Text> · {state.meta.model}</Text>
-          {state.meta.title ? <Text dimColor> · {state.meta.title}</Text> : null}
-        </Text>
-        <Text dimColor>{state.meta.cwd} · {state.meta.id}{state.opening ? " · 载入中…" : ""}</Text>
-        <Text dimColor>/help 命令帮助 · /providers 可用提供方 · /status 会话状态</Text>
-      </Box>
-
       <Static key={state.generation} items={state.items}>
         {(item, i) => <ItemView key={i} item={item} />}
       </Static>
+
+      {conversationEmpty && !state.opening ? <Welcome /> : null}
 
       {state.liveText ? (
         <Box>
@@ -499,7 +530,7 @@ export function App({
 
       {sessions ? <SessionList sessions={sessions} /> : null}
 
-      {picker ? <ModelPicker rows={picker.rows} index={picker.index} /> : null}
+      {picker ? <ModelPicker rows={picker.rows} index={picker.index} filter={picker.filter} /> : null}
 
       {pendings[0] ? (
         <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
@@ -514,18 +545,51 @@ export function App({
 
       {!pendings[0] && !picker && (
         <Box flexDirection="column">
-          <Box>
-            <Text><Text color="green">❯ </Text>{input}<Text inverse> </Text></Text>
+          <Box borderStyle="round" borderColor={state.running ? "gray" : "cyan"} paddingX={1} flexDirection="column">
+            <Box>
+              <Text color="cyan">❯ </Text>
+              {input ? (
+                <Text>{input}<Text inverse> </Text></Text>
+              ) : (
+                <Text dimColor>问点什么… 例如 “修复失败的测试”<Text inverse> </Text></Text>
+              )}
+            </Box>
+            <Text>
+              <Text color={state.running ? "yellow" : "green"}>● </Text>
+              <Text dimColor>{state.meta.model} · {basename(state.meta.cwd)}</Text>
+              {state.meta.title ? <Text dimColor> · {truncate(state.meta.title, 24)}</Text> : null}
+            </Text>
           </Box>
-          {state.running ? <Text dimColor>… 工作中（Enter 追加指令 · Esc 中断）</Text> : null}
+          <Box justifyContent="flex-end">
+            <Text dimColor>
+              {state.running ? "Esc 中断 · Enter 追加" : "/model 切换模型 · /help 命令 · /sessions 会话"}
+            </Text>
+          </Box>
         </Box>
       )}
 
-      <Box>
-        <Text dimColor>{`会话 ${state.meta.id.slice(0, 10)}… · ${state.meta.model} · in ${u.inputTokens} (cache ${u.cacheReadTokens}) / out ${u.outputTokens} tokens`}</Text>
+      <Box flexDirection="column">
+        <Box justifyContent="space-between">
+          <Text dimColor>{tildify(state.meta.cwd)}</Text>
+          <Text dimColor>{APP_NAME} v{version}</Text>
+        </Box>
+        <Text dimColor>
+          {state.meta.model} · in {u.inputTokens} / out {u.outputTokens} tokens
+        </Text>
       </Box>
     </Box>
   );
+}
+
+function basename(p: string): string {
+  const parts = p.replace(/\/+$/, "").split("/");
+  return parts[parts.length - 1] || p;
+}
+
+/** 用 ~ 缩写 home 目录，其余原样（状态栏展示路径用）。 */
+function tildify(p: string): string {
+  const home = process.env["HOME"] || "";
+  return home && p.startsWith(home) ? "~" + p.slice(home.length) : p;
 }
 
 function handleEvent(
@@ -681,6 +745,7 @@ export function buildPickerRows(
   catalog: readonly ModelCatalogEntry[],
   providers: readonly ProviderDescriptor[],
   inspectCredentials: boolean,
+  liveLocal?: { probed: Set<string>; live: Set<string> },
 ): PickerRow[] {
   const byId = new Map(providers.map((p) => [p.id, p]));
   const rows = catalog.map((entry): PickerRow => {
@@ -688,7 +753,11 @@ export function buildPickerRows(
     const apiKeyEnv = descriptor?.apiKeyEnv ?? [];
     let ready: boolean | undefined;
     let readyHint: string;
-    if (!entry.requiresApiKey) {
+    if (liveLocal?.probed.has(entry.providerId)) {
+      // 有本地端点的 provider：以存活探测为准，未启动就别标成就绪（否则选了必然 Connection error）。
+      ready = liveLocal.live.has(entry.providerId);
+      readyHint = ready ? `${entry.providerName} 已就绪` : `需先启动 ${entry.providerName}`;
+    } else if (!entry.requiresApiKey) {
       ready = true;
       readyHint = entry.local ? "本地/免 key" : "免 key";
     } else if (!inspectCredentials) {
@@ -712,37 +781,120 @@ export function buildPickerRows(
       readyHint,
     };
   });
-  // 稳定排序：就绪且推荐的模型排在前面，其余保留声明顺序。
-  return rows
-    .map((row, i) => ({ row, i, score: (row.ready !== false ? 2 : 0) + (row.recommended ? 1 : 0) }))
-    .sort((a, b) => b.score - a.score || a.i - b.i)
-    .map((x) => x.row);
+  // 保留目录顺序（已按 provider 聚合），便于选择器按 provider 分组展示。
+  return rows;
 }
 
-function ModelPicker({ rows, index }: { rows: PickerRow[]; index: number }) {
+/** 按搜索词过滤选择器行（匹配 label / spec / provider）。 */
+export function filterPickerRows(rows: readonly PickerRow[], filter: string): PickerRow[] {
+  const q = filter.trim().toLowerCase();
+  if (!q) return [...rows];
+  return rows.filter(
+    (r) =>
+      r.spec.toLowerCase().includes(q) ||
+      r.label.toLowerCase().includes(q) ||
+      r.providerName.toLowerCase().includes(q),
+  );
+}
+
+/** 探测本地 provider 存活，返回 {有端点的, 确实在跑的} 两个集合供就绪判定。 */
+async function probeLive(
+  providers: readonly ProviderDescriptor[],
+): Promise<{ probed: Set<string>; live: Set<string> }> {
+  const probed = new Set(
+    providers.filter((p) => p.local && (p.baseURL || p.baseURLEnv)).map((p) => p.id),
+  );
+  const live = await probeLocalProviders(providers);
+  return { probed, live };
+}
+
+function ModelPicker({ rows, index, filter }: { rows: PickerRow[]; index: number; filter: string }) {
+  const visible = filterPickerRows(rows, filter);
+  const selectedSpec = visible[index]?.spec;
+  // 按 provider 分组并保留出现顺序；只显示当前高亮项附近的一段，避免超长列表撑爆终端。
+  const groups: { provider: string; items: PickerRow[] }[] = [];
+  for (const row of visible) {
+    const last = groups[groups.length - 1];
+    if (last && last.provider === row.providerName) last.items.push(row);
+    else groups.push({ provider: row.providerName, items: [row] });
+  }
+
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="green" paddingX={1}>
-      <Text color="green" bold>选择模型（↑/↓ 移动 · Enter 新建会话 · Esc 取消）</Text>
-      {rows.map((row, i) => {
-        const selected = i === index;
-        const tags = [
-          row.free ? "免费" : null,
-          row.openWeight ? "开源" : null,
-          row.local ? "本地" : null,
-          row.recommended ? "推荐" : null,
-        ].filter(Boolean);
-        const readyMark = row.ready === false ? "✖" : row.ready === true ? "✔" : "·";
-        const readyColor = row.ready === false ? "red" : row.ready === true ? "cyan" : "gray";
-        return (
-          <Box key={row.spec}>
-            <Text {...(selected ? { color: "green" as const } : {})}>{selected ? "❯ " : "  "}</Text>
-            <Text color={readyColor as never}>{readyMark} </Text>
-            <Text bold={selected}>{row.label}</Text>
-            {tags.length > 0 ? <Text color="yellow"> [{tags.join(" ")}]</Text> : null}
-            <Text dimColor> {row.spec} · {row.readyHint}</Text>
-          </Box>
-        );
-      })}
+    <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={2} paddingY={0}>
+      <Box justifyContent="space-between">
+        <Text bold>选择模型</Text>
+        <Text dimColor>Esc</Text>
+      </Box>
+      <Box>
+        <Text color="yellow">🔍 </Text>
+        {filter ? <Text>{filter}<Text inverse> </Text></Text> : <Text dimColor>输入以搜索…<Text inverse> </Text></Text>}
+      </Box>
+      {visible.length === 0 ? <Text dimColor>（无匹配模型）</Text> : null}
+      {groups.map((g) => (
+        <Box key={g.provider} flexDirection="column" marginTop={1}>
+          <Text color="magenta" bold>{g.provider}</Text>
+          {g.items.map((row) => {
+            const selected = row.spec === selectedSpec;
+            const mark = row.ready === false ? "✖" : row.ready === true ? "✔" : "·";
+            const markColor = row.ready === false ? "red" : row.ready === true ? "green" : "gray";
+            return (
+              <Box key={row.spec} justifyContent="space-between">
+                <Text {...(selected ? { color: "cyan" as const, bold: true } : {})}>
+                  {selected ? "❯ " : "  "}
+                  <Text color={markColor as never}>{mark}</Text> {row.label}
+                </Text>
+                <Text dimColor>
+                  {row.free ? "Free " : ""}
+                  {row.ready === false ? row.readyHint : ""}
+                </Text>
+              </Box>
+            );
+          })}
+        </Box>
+      ))}
+      <Box marginTop={1}>
+        <Text dimColor>↑/↓ 选择 · Enter 确认 · Esc 取消</Text>
+      </Box>
+    </Box>
+  );
+}
+
+// ---------- 欢迎页 logo ----------
+
+const LOGO_GLYPHS: Record<string, string[]> = {
+  a: [" ██ ", "█  █", "████", "█  █", "█  █"],
+  n: ["█  █", "██ █", "█ ██", "█  █", "█  █"],
+  i: ["███", " █ ", " █ ", " █ ", "███"],
+  c: [" ███", "█   ", "█   ", "█   ", " ███"],
+  o: [" ██ ", "█  █", "█  █", "█  █", " ██ "],
+  d: ["██  ", "█ █ ", "█  █", "█ █ ", "██  "],
+  e: ["████", "█   ", "███ ", "█   ", "████"],
+};
+
+function wordmarkRows(word: string): string[] {
+  const rows = ["", "", "", "", ""];
+  for (const ch of word) {
+    const g = LOGO_GLYPHS[ch] ?? ["", "", "", "", ""];
+    for (let r = 0; r < 5; r++) rows[r] += g[r] + " ";
+  }
+  return rows;
+}
+
+function Welcome() {
+  // 前半 dim、后半亮，模仿 opencode 的双色 wordmark（这里 "ani" 暗、"code" 亮）。
+  const head = wordmarkRows("ani");
+  const tail = wordmarkRows("code");
+  return (
+    <Box flexDirection="column" alignItems="center" marginY={2}>
+      {head.map((row, i) => (
+        <Text key={i}>
+          <Text dimColor>{row}</Text>
+          <Text bold>{tail[i]}</Text>
+        </Text>
+      ))}
+      <Box marginTop={1}>
+        <Text dimColor>自研 AI coding agent · 输入需求开始 · /model 换模型 · /help 帮助</Text>
+      </Box>
     </Box>
   );
 }

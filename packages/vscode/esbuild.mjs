@@ -1,5 +1,5 @@
 // 构建两个 bundle：扩展主机（Node/CJS，external vscode）与 webview（浏览器/IIFE）。
-// @agentx/core 及其 SDK 依赖一并打进主机 bundle，因此 .vsix 自包含。
+// @anicode/core 及其 SDK 依赖一并打进主机 bundle，因此 .vsix 自包含。
 import * as esbuild from "esbuild";
 
 const production = process.argv.includes("--production");

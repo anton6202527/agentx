@@ -3,8 +3,8 @@
  * write → 把写入内容当作全新增；edit → old_string vs new_string 的行级 diff。
  */
 
-import type { ChatMessage } from "@agentx/core";
-import { diffLines, diffStat, type DiffLine } from "@agentx/shared";
+import type { ChatMessage } from "@anicode/core";
+import { diffLines, diffStat, type DiffLine } from "@anicode/shared";
 import type { FileChange } from "./protocol.js";
 
 const MAX_LINES = 200;

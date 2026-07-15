@@ -3,7 +3,7 @@
  * 维护「当前活动会话」：VSCode 侧边栏是单一活动对话，切模型/新建/恢复都换这个活动会话。
  */
 
-import type { SessionEvent, SessionManager } from "@agentx/core";
+import type { SessionEvent, SessionManager } from "@anicode/core";
 import type { HostToWebview, PendingPerm, PermissionDecision, WebviewToHost } from "./protocol.js";
 import { fileChangeFor } from "./filechange.js";
 

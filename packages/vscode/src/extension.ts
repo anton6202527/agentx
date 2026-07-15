@@ -17,12 +17,12 @@ export function activate(context: vscode.ExtensionContext): void {
   const manager = buildManager(sessionsDir);
 
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  status.command = "agentx.pickModel";
+  status.command = "anicode.pickModel";
   context.subscriptions.push(status);
 
   const provider = new ChatViewProvider(context.extensionUri, manager, cwd, () => {
     status.text = `$(sparkle) ${provider.model}`;
-    status.tooltip = `agentx 模型：${provider.model}（点击切换）`;
+    status.tooltip = `anicode 模型：${provider.model}（点击切换）`;
     status.show();
   });
 
@@ -30,12 +30,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider(ChatViewProvider.viewId, provider, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
-    vscode.commands.registerCommand("agentx.focus", () =>
-      vscode.commands.executeCommand("agentx.chat.focus"),
+    vscode.commands.registerCommand("anicode.focus", () =>
+      vscode.commands.executeCommand("anicode.chat.focus"),
     ),
-    vscode.commands.registerCommand("agentx.newSession", () => provider.newSession()),
-    vscode.commands.registerCommand("agentx.pickModel", () => provider.pickModel()),
-    vscode.commands.registerCommand("agentx.resume", () => provider.resume()),
+    vscode.commands.registerCommand("anicode.newSession", () => provider.newSession()),
+    vscode.commands.registerCommand("anicode.pickModel", () => provider.pickModel()),
+    vscode.commands.registerCommand("anicode.resume", () => provider.resume()),
     { dispose: () => provider.dispose() },
   );
 }
@@ -43,13 +43,13 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {}
 
 class ChatViewProvider implements vscode.WebviewViewProvider {
-  static readonly viewId = "agentx.chat";
+  static readonly viewId = "anicode.chat";
   private view: vscode.WebviewView | undefined;
   private bridge: ChatBridge;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
-    private readonly manager: import("@agentx/core").SessionManager,
+    private readonly manager: import("@anicode/core").SessionManager,
     private readonly cwd: string,
     private readonly onModelChange: () => void,
   ) {
@@ -87,7 +87,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   async pickModel(): Promise<void> {
-    const choices = modelChoices();
+    const choices = await modelChoices();
     const pick = await vscode.window.showQuickPick(
       choices.map((c) => ({ label: c.label, detail: c.detail, spec: c.spec })),
       { title: "选择模型", placeHolder: "✔ 可直接使用 · ✖ 缺凭证", matchOnDetail: true },
@@ -153,7 +153,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async reveal(): Promise<void> {
     if (this.view) this.view.show?.(true);
-    else await vscode.commands.executeCommand("agentx.chat.focus");
+    else await vscode.commands.executeCommand("anicode.chat.focus");
   }
 
   dispose(): void {
@@ -177,7 +177,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="${styleUri}" />
-  <title>agentx</title>
+  <title>anicode</title>
 </head>
 <body>
   <div id="root"></div>

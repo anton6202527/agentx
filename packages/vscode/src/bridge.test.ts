@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { SessionManager, SessionStore } from "@agentx/core";
+import { SessionManager, SessionStore } from "@anicode/core";
 import { buildManager, resolveConfiguredProvider } from "./host.js";
 import { ChatBridge } from "./bridge.js";
 import type { HostToWebview } from "./protocol.js";

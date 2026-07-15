@@ -234,6 +234,26 @@ const OPENAI_BUILTINS: OpenAICompatibleProviderRegistration[] = [
       },
     ],
   }),
+  openAI("opencode", "OpenCode Zen", "https://opencode.ai/zen/v1", "OPENCODE_API_KEY", {
+    baseURLEnv: "OPENCODE_BASE_URL",
+    streamUsage: true,
+    maxTokensField: "max_tokens",
+    reasoningEffort: false,
+    capabilities: cloudDefaults,
+    // OpenCode Zen 的免费模型：需 OPENCODE_API_KEY（opencode 账号），无按量计费。名单会随平台轮换。
+    catalog: [
+      { model: "big-pickle", label: "Big Pickle（免费）", free: true, recommended: true, note: "OpenCode Zen 免费" },
+      { model: "mimo-v2.5-free", label: "MiMo V2.5（免费）", free: true, openWeight: true },
+      { model: "deepseek-v4-flash-free", label: "DeepSeek V4 Flash（免费）", free: true, openWeight: true },
+      { model: "north-mini-code-free", label: "North Mini Code（免费）", free: true },
+      { model: "nemotron-3-ultra-free", label: "Nemotron 3 Ultra（免费）", free: true, openWeight: true },
+      { model: "glm-4.7-free", label: "GLM-4.7（免费）", free: true, openWeight: true },
+      { model: "kimi-k2.5-free", label: "Kimi K2.5（免费）", free: true, openWeight: true },
+      { model: "minimax-m3-free", label: "MiniMax-M3（免费）", free: true, openWeight: true },
+      { model: "hy3-free", label: "Hy3（免费）", free: true },
+      { model: "grok-code", label: "Grok Code Fast（免费）", free: true },
+    ],
+  }),
   openAI("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", {
     baseURLEnv: "DEEPSEEK_BASE_URL",
     streamUsage: true,
@@ -467,7 +487,7 @@ for (const builtin of OPENAI_BUILTINS) registerOpenAICompatibleProvider(builtin)
 
 const debugDescriptor = descriptor({
   id: "debug",
-  name: "AgentX Debug",
+  name: "anicode Debug",
   kind: "debug",
   protocol: "debug",
   aliases: ["demo"],

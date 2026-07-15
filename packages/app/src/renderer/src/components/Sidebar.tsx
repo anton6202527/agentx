@@ -1,5 +1,5 @@
 import React from "react";
-import type { SessionSummary } from "@agentx/core";
+import type { SessionSummary } from "@anicode/core";
 
 export type View = "chat" | "marketplace" | "settings";
 
@@ -17,7 +17,7 @@ export function Sidebar({ sessions, currentId, view, onNew, onSelect, onDelete, 
   return (
     <aside className="sidebar">
       <div className="sidebar-top">
-        <div className="brand">◆ agentx</div>
+        <div className="brand">◆ anicode</div>
         <button className="new-chat" onClick={onNew}>
           ＋ 新对话
         </button>

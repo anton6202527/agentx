@@ -3,8 +3,8 @@
  * 又一个 SessionHost 传输实现：主机跑 core，webview 只渲染。
  */
 
-import type { ChatMessage, SessionEvent, Usage } from "@agentx/core";
-import type { DiffLine } from "@agentx/shared";
+import type { ChatMessage, SessionEvent, Usage } from "@anicode/core";
+import type { DiffLine } from "@anicode/shared";
 
 /** 一次文件写/改的结构化预览，供 webview 渲染红绿 diff。 */
 export interface FileChange {

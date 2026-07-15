@@ -34,6 +34,8 @@ export {
   type OpenAICompatibleProviderRegistration,
 } from "./provider/registry.js";
 
+export { probeEndpoint, probeLocalProviders } from "./provider/probe.js";
+
 export {
   Agent,
   repairHistory,

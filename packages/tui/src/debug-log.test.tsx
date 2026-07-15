@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { SessionHost } from "@agentx/core";
+import type { SessionHost } from "@anicode/core";
 import { DebugLogger, withDebugLogging } from "./debug-log.js";
 
 test("debug log: 默认只记内容长度并保持 SessionHost 行为", async () => {

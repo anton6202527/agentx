@@ -3,7 +3,7 @@
  * 纯函数，只依赖 core 类型；resume / 晚订阅时用 snapshot.messages 还原界面靠它。
  */
 
-import type { ChatMessage, TodoItem } from "@agentx/core";
+import type { ChatMessage, TodoItem } from "@anicode/core";
 
 export type Item =
   | { kind: "user"; text: string }

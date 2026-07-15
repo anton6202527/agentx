@@ -11,7 +11,9 @@ import {
   createProvider,
   diagnoseProvider,
   listModelCatalog,
-} from "@agentx/core";
+  listProviderDetails,
+  probeLocalProviders,
+} from "@anicode/core";
 
 export const DEFAULT_MODEL = "debug/demo";
 
@@ -44,20 +46,30 @@ export interface ModelChoice {
   ready: boolean;
 }
 
-/** 目录 + 就绪状态；主机能读 env，据此排序与标注。 */
-export function modelChoices(): ModelChoice[] {
+/** 目录 + 就绪状态；主机能读 env 并探测本地服务存活，据此排序与标注。 */
+export async function modelChoices(): Promise<ModelChoice[]> {
+  const details = listProviderDetails();
+  const probed = new Set(details.filter((d) => d.local && (d.baseURL || d.baseURLEnv)).map((d) => d.id));
+  const live = await probeLocalProviders(details);
   return listModelCatalog()
     .map((entry) => {
       const d = diagnoseProvider(entry.spec);
-      const ready = !d.requiresApiKey || d.hasCredentials;
+      let ready: boolean;
+      let cred: string;
+      if (probed.has(entry.providerId)) {
+        // 本地端点：以存活探测为准（未启动 → 不可用），别被「免 key」误导。
+        ready = live.has(entry.providerId);
+        cred = ready ? `${entry.providerName} 已就绪` : `需先启动 ${entry.providerName}`;
+      } else if (!d.requiresApiKey) {
+        ready = true;
+        cred = "免 key";
+      } else {
+        ready = d.hasCredentials;
+        cred = ready ? `${d.credentialEnv ?? "凭证"} 已配置` : `缺 ${d.apiKeyEnv.join(" / ") || "API key"}`;
+      }
       const tags = [entry.free ? "免费" : "", entry.openWeight ? "开源" : "", entry.local ? "本地" : ""]
         .filter(Boolean)
         .join(" · ");
-      const cred = ready
-        ? d.requiresApiKey
-          ? `${d.credentialEnv ?? "凭证"} 已配置`
-          : "免 key"
-        : `缺 ${d.apiKeyEnv.join(" / ") || "API key"}`;
       return {
         spec: entry.spec,
         label: `${ready ? "✔" : "✖"} ${entry.label ?? entry.model}`,

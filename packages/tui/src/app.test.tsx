@@ -21,7 +21,7 @@ import {
   type ProviderDescriptor,
   type SessionEvent,
   type SessionHost,
-} from "@agentx/core";
+} from "@anicode/core";
 import { App } from "./app.js";
 import { messagesToItems, todosFromMessages } from "./transcript.js";
 
@@ -520,7 +520,8 @@ test("TUI: /model 无参打开选择器，↓ 选中并 Enter 以该模型新建
     const pickerFrame = view.lastFrame() ?? "";
     assert.match(pickerFrame, /选择模型/);
     assert.match(pickerFrame, /Debug Demo/);
-    assert.match(pickerFrame, /免费 开源/); // Llama 行带 免费+开源 标签
+    assert.match(pickerFrame, /Free/); // 免费模型右侧标 Free
+    assert.match(pickerFrame, /OpenRouter/); // 按 provider 分组的组标题
     // 打开时未新建会话
     assert.equal(created, undefined);
 

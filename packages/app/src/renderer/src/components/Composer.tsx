@@ -42,7 +42,7 @@ export function Composer({ running, modelLabel, disabled, onSend, onInterrupt, o
         <textarea
           ref={textareaRef}
           className="composer-input"
-          placeholder="给 agentx 发消息…（Enter 发送，Shift+Enter 换行）"
+          placeholder="给 anicode 发消息…（Enter 发送，Shift+Enter 换行）"
           value={text}
           disabled={disabled}
           rows={1}
@@ -60,7 +60,7 @@ export function Composer({ running, modelLabel, disabled, onSend, onInterrupt, o
           )}
         </div>
       </div>
-      <div className="composer-hint">agentx 可能出错；重要操作会请求授权。</div>
+      <div className="composer-hint">anicode 可能出错；重要操作会请求授权。</div>
     </div>
   );
 }

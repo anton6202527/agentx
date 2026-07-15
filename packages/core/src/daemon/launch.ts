@@ -17,7 +17,7 @@ import { SessionStore } from "../session.js";
 import { createProvider, diagnoseProvider } from "../provider/registry.js";
 
 export function defaultSocketPath(): string {
-  return path.join(os.tmpdir(), "agentx.sock");
+  return path.join(os.tmpdir(), "anicode.sock");
 }
 
 const DAEMON_VERSION = "0.0.1";
@@ -34,7 +34,7 @@ export function daemonHelpText(): string {
   return `agentx-daemon ${DAEMON_VERSION}\n\n` +
     `用法: agentx-daemon [选项]\n\n` +
     `  --socket <path>       Unix socket 路径（默认 ${defaultSocketPath()}）\n` +
-    `  --sessions <dir>      会话目录（默认 ~/.agentx/sessions）\n` +
+    `  --sessions <dir>      会话目录（默认 ~/.anicode/sessions）\n` +
     `  --auto                自动允许工具操作\n` +
     `  --accept-edits        自动允许文件编辑，命令仍询问\n` +
     `  -h, --help            显示帮助\n` +
@@ -43,7 +43,7 @@ export function daemonHelpText(): string {
 
 export function parseDaemonArgs(argv: string[]): DaemonArgs {
   let socketPath = defaultSocketPath();
-  let sessionsDir = path.join(os.homedir(), ".agentx", "sessions");
+  let sessionsDir = path.join(os.homedir(), ".anicode", "sessions");
   let permissionMode: DaemonArgs["permissionMode"] = "default";
   let help = false;
   let version = false;

@@ -9,7 +9,7 @@ import type {
   SessionMeta,
   TodoItem,
   Usage,
-} from "@agentx/core";
+} from "@anicode/core";
 import { messagesToItems, todosFromMessages, type Item } from "./transcript.js";
 
 export interface PendingPerm {
@@ -202,7 +202,7 @@ export function useSession(sessionId: string | null): SessionController {
     const buffered: SessionEvent[] = [];
     dispatch({ t: "opening", v: true });
 
-    const off = window.agentx.onEvent((envelope) => {
+    const off = window.anicode.onEvent((envelope) => {
       if (closed || envelope.subId !== subId) return;
       if (!ready) {
         buffered.push(envelope.event);
@@ -211,11 +211,11 @@ export function useSession(sessionId: string | null): SessionController {
       applyEvent(dispatch, envelope.event);
     });
 
-    window.agentx
+    window.anicode
       .open(sessionId)
       .then((result) => {
         if (closed) {
-          void window.agentx.close(result.subId);
+          void window.anicode.close(result.subId);
           return;
         }
         subId = result.subId;
@@ -251,7 +251,7 @@ export function useSession(sessionId: string | null): SessionController {
     return () => {
       closed = true;
       off();
-      if (subId) void window.agentx.close(subId);
+      if (subId) void window.anicode.close(subId);
     };
   }, [sessionId]);
 
@@ -259,7 +259,7 @@ export function useSession(sessionId: string | null): SessionController {
     const id = sessionRef.current;
     if (!id) return;
     dispatch({ t: "permRemove", permId });
-    void window.agentx.answerPermission(id, permId, decision).catch((err: unknown) => {
+    void window.anicode.answerPermission(id, permId, decision).catch((err: unknown) => {
       dispatch({ t: "push", item: { kind: "error", text: `授权答复失败: ${errorMessage(err)}` } });
     });
   };
