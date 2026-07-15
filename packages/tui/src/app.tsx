@@ -23,9 +23,12 @@ import type {
 } from "@anicode/core";
 import { messagesToItems, todosFromMessages, firstLine, truncate, type Item } from "./transcript.js";
 
+/** transcript 行：既有条目 + 欢迎 logo（logo 放进 Static 只画一次，避免动态区重绘鬼影）。 */
+type Row = Item | { kind: "logo" };
+
 interface State {
   /** 只追加的已完成 transcript；Ink Static 不支持原位更新。 */
-  items: Item[];
+  items: Row[];
   /** 尚未产生 tool_result 的调用，在 Static 下方动态渲染。 */
   activeTools: Map<string, Extract<Item, { kind: "tool" }>>;
   liveText: string;
@@ -41,7 +44,7 @@ interface State {
 type Action =
   | {
       t: "reset";
-      items: Item[];
+      items: Row[];
       activeTools: Map<string, Extract<Item, { kind: "tool" }>>;
       usage: Usage;
       running: boolean;
@@ -235,9 +238,14 @@ export function App({
         closeRef.current = handle.close;
         const snap = handle.snapshot;
         const restored = restoreTranscript(snap.messages);
+        // 会话边界始终保留；空会话在其后加一次性 logo（放进 Static 只画一次，避免动态区重绘鬼影）。
+        const initialItems: Row[] =
+          restored.items.length === 0
+            ? [sessionBoundary(snap.meta), { kind: "logo" }]
+            : [sessionBoundary(snap.meta), ...restored.items];
         dispatch({
           t: "reset",
-          items: [sessionBoundary(snap.meta), ...restored.items],
+          items: initialItems,
           activeTools: restored.activeTools,
           usage: snap.usage,
           running: snap.running,
@@ -502,18 +510,14 @@ export function App({
   });
 
   const u = state.usage;
-  const conversationEmpty =
-    !state.items.some((i) => i.kind === "user" || i.kind === "assistant" || i.kind === "tool") &&
-    !state.liveText &&
-    state.activeTools.size === 0;
 
   return (
     <Box flexDirection="column">
       <Static key={state.generation} items={state.items}>
-        {(item, i) => <ItemView key={i} item={item} />}
+        {(item, i) =>
+          item.kind === "logo" ? <Welcome key={i} /> : <ItemView key={i} item={item} />
+        }
       </Static>
-
-      {conversationEmpty && !state.opening ? <Welcome /> : null}
 
       {state.liveText ? (
         <Box>
@@ -544,38 +548,44 @@ export function App({
       ) : null}
 
       {!pendings[0] && !picker && (
-        <Box flexDirection="column">
-          <Box borderStyle="round" borderColor={state.running ? "gray" : "cyan"} paddingX={1} flexDirection="column">
+        <Box flexDirection="column" marginTop={1}>
+          <Box
+            borderStyle="single"
+            borderColor={state.running ? "gray" : "cyan"}
+            borderTop={false}
+            borderRight={false}
+            borderBottom={false}
+            paddingLeft={1}
+            flexDirection="column"
+          >
             <Box>
-              <Text color="cyan">❯ </Text>
               {input ? (
                 <Text>{input}<Text inverse> </Text></Text>
               ) : (
-                <Text dimColor>问点什么… 例如 “修复失败的测试”<Text inverse> </Text></Text>
+                <Text dimColor>输入需求开始… 例如「修复一个失败的测试」<Text inverse> </Text></Text>
               )}
             </Box>
             <Text>
-              <Text color={state.running ? "yellow" : "green"}>● </Text>
-              <Text dimColor>{state.meta.model} · {basename(state.meta.cwd)}</Text>
-              {state.meta.title ? <Text dimColor> · {truncate(state.meta.title, 24)}</Text> : null}
+              <Text color={state.running ? "yellow" : "cyan"}>● </Text>
+              <Text color="white">{state.meta.model}</Text>
+              <Text dimColor> · {basename(state.meta.cwd)}</Text>
+              {state.meta.title ? <Text dimColor> · {truncate(state.meta.title, 20)}</Text> : null}
             </Text>
           </Box>
           <Box justifyContent="flex-end">
             <Text dimColor>
-              {state.running ? "Esc 中断 · Enter 追加" : "/model 切换模型 · /help 命令 · /sessions 会话"}
+              {state.running ? "esc 中断 · enter 追加" : "/model 换模型 · /help 命令 · ctrl+z 退出"}
             </Text>
           </Box>
         </Box>
       )}
 
-      <Box flexDirection="column">
+      <Box flexDirection="column" marginTop={1}>
         <Box justifyContent="space-between">
           <Text dimColor>{tildify(state.meta.cwd)}</Text>
           <Text dimColor>{APP_NAME} v{version}</Text>
         </Box>
-        <Text dimColor>
-          {state.meta.model} · in {u.inputTokens} / out {u.outputTokens} tokens
-        </Text>
+        <Text dimColor>{state.meta.model} · in {u.inputTokens} / out {u.outputTokens} tokens</Text>
       </Box>
     </Box>
   );
@@ -881,19 +891,19 @@ function wordmarkRows(word: string): string[] {
 }
 
 function Welcome() {
-  // 前半 dim、后半亮，模仿 opencode 的双色 wordmark（这里 "ani" 暗、"code" 亮）。
+  // 对齐 opencode 的双色 wordmark：前段灰、后段亮白。
   const head = wordmarkRows("ani");
   const tail = wordmarkRows("code");
   return (
-    <Box flexDirection="column" alignItems="center" marginY={2}>
+    <Box flexDirection="column" alignItems="center" marginTop={1} marginBottom={1}>
       {head.map((row, i) => (
         <Text key={i}>
-          <Text dimColor>{row}</Text>
-          <Text bold>{tail[i]}</Text>
+          <Text color="gray">{row}</Text>
+          <Text color="white" bold>{tail[i]}</Text>
         </Text>
       ))}
       <Box marginTop={1}>
-        <Text dimColor>自研 AI coding agent · 输入需求开始 · /model 换模型 · /help 帮助</Text>
+        <Text dimColor>anicode · 自研 AI coding agent</Text>
       </Box>
     </Box>
   );
