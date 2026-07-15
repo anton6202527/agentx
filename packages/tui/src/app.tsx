@@ -8,7 +8,7 @@
  */
 
 import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { Box, Text, Static, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { probeLocalProviders } from "@anicode/core";
 import type {
   ChatMessage,
@@ -134,6 +134,26 @@ const emptyUsage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
 /** 品牌名（欢迎页 logo 与状态栏）。 */
 export const APP_NAME = "anicode";
 
+/** 终端尺寸（rows/cols）；resize 时更新。非 TTY（测试）给合理默认值。 */
+function useTerminalSize(): { rows: number; cols: number } {
+  const { stdout } = useStdout();
+  const read = (): { rows: number; cols: number } => ({
+    rows: stdout && stdout.rows > 0 ? stdout.rows : 24,
+    cols: stdout && stdout.columns > 0 ? stdout.columns : 80,
+  });
+  const [size, setSize] = useState(read);
+  useEffect(() => {
+    if (!stdout || typeof stdout.on !== "function") return;
+    const onResize = () => setSize(read());
+    stdout.on("resize", onResize);
+    return () => {
+      stdout.off?.("resize", onResize);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stdout]);
+  return size;
+}
+
 interface PendingPerm {
   permId: string;
   toolName: string;
@@ -166,6 +186,16 @@ export function App({
   version = "0.0.1",
 }: AppProps) {
   const { exit } = useApp();
+  const { rows: termRows } = useTerminalSize();
+  // 进入 alt-screen 占满终端，退出时还原原有回滚缓冲（仅真实 TTY；测试跳过）。
+  useEffect(() => {
+    const out = process.stdout;
+    if (!out.isTTY) return;
+    out.write("\x1b[?1049h\x1b[H");
+    return () => {
+      out.write("\x1b[?1049l");
+    };
+  }, []);
   const [sessionId, setSessionId] = useState(initialId);
   const [state, dispatch] = useReducer(reducer, {
     items: [],
@@ -510,27 +540,37 @@ export function App({
   });
 
   const u = state.usage;
+  const conversationEmpty =
+    !state.items.some((i) => i.kind === "user" || i.kind === "assistant" || i.kind === "tool") &&
+    !state.liveText &&
+    state.activeTools.size === 0;
 
   return (
-    <Box flexDirection="column">
-      <Static key={state.generation} items={state.items}>
-        {(item, i) =>
-          item.kind === "logo" ? <Welcome key={i} /> : <ItemView key={i} item={item} />
-        }
-      </Static>
+    <Box flexDirection="column" height={termRows}>
+      {/* 内容区弹性铺满：有对话时贴底（最新可见）；空会话时贴顶（logo 在上）。 */}
+      <Box
+        flexGrow={1}
+        flexDirection="column"
+        overflow="hidden"
+        justifyContent={conversationEmpty ? "flex-start" : "flex-end"}
+      >
+        {state.items.map((item, i) =>
+          item.kind === "logo" ? <Welcome key={i} /> : <ItemView key={i} item={item} />,
+        )}
 
-      {state.liveText ? (
-        <Box>
-          <Text color="green">● </Text>
-          <Text>{state.liveText}</Text>
-        </Box>
-      ) : null}
+        {state.liveText ? (
+          <Box>
+            <Text color="green">● </Text>
+            <Text>{state.liveText}</Text>
+          </Box>
+        ) : null}
 
-      {[...state.activeTools.values()].map((tool) => (
-        <ItemView key={tool.id} item={tool} />
-      ))}
+        {[...state.activeTools.values()].map((tool) => (
+          <ItemView key={tool.id} item={tool} />
+        ))}
 
-      {state.todos.length > 0 ? <TodoList todos={state.todos} /> : null}
+        {state.todos.length > 0 ? <TodoList todos={state.todos} /> : null}
+      </Box>
 
       {sessions ? <SessionList sessions={sessions} /> : null}
 
