@@ -29,7 +29,7 @@ import {
 import { App } from "./app.js";
 import { DebugLogger, withDebugLogging } from "./debug-log.js";
 
-const CLI_VERSION = "0.1.1";
+const CLI_VERSION = "0.1.2";
 // 默认走 DeepSeek 开放模型；真正生效值由 resolveDefaultModel 在运行时按凭证/本地服务挑选
 // （无 DeepSeek key 时优雅回退，见 resolveDefaultModel）。
 const DEFAULT_MODEL = "deepseek/deepseek-chat";

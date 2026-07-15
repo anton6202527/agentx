@@ -133,6 +133,8 @@ const emptyUsage: Usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
 
 /** 品牌名（欢迎页 logo 与状态栏）。 */
 export const APP_NAME = "anicode";
+// 生成中的 braille spinner 帧（对齐 opencode 的动画指示手感）。
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /** 终端尺寸（rows/cols）；resize 时更新。非 TTY（测试）给合理默认值。 */
 function useTerminalSize(): { rows: number; cols: number } {
@@ -209,6 +211,12 @@ export function App({
     opening: true,
   });
   const [input, setInput] = useState("");
+  // 光标位置（0..input.length）。用 ref 与渲染态双写，保证同 tick 内多次编辑基于最新值。
+  const [cursor, setCursor] = useState(0);
+  const cursorRef = useRef(0);
+  // 已提交行的历史，供 ↑/↓ 回溯（最新在末尾）。histRef 为当前浏览位置（null=不在浏览）。
+  const historyRef = useRef<string[]>([]);
+  const histPosRef = useRef<number | null>(null);
   // PTY paste 可能一次把整段文本连同 \r/\n 交给 useInput；用 ref 保证同一 tick
   // 内的分块输入也基于最新值，而不是 React 上一帧的闭包。
   const inputRef = useRef("");
@@ -220,8 +228,19 @@ export function App({
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
   // /model 选择器：非空即打开，index 为高亮项，filter 为搜索词。
   const [picker, setPicker] = useState<{ rows: PickerRow[]; index: number; filter: string } | null>(null);
+  // 回看滚动偏移：0=贴底看最新，>0=向上回看的条目数。
+  const [scrollOffset, setScrollOffset] = useState(0);
   const closeRef = useRef<(() => void) | null>(null);
   const flushRef = useRef<(() => void) | null>(null);
+  // 流式生成指示：running 期间以 ~120ms 步进推进 spinner 帧并刷新计时。
+  const [spin, setSpin] = useState(0);
+  const runStartRef = useRef(0);
+  useEffect(() => {
+    if (!state.running) return;
+    runStartRef.current = Date.now();
+    const id = setInterval(() => setSpin((n) => n + 1), 120);
+    return () => clearInterval(id);
+  }, [state.running]);
 
   const selectModel = useCallback(
     async (spec: string): Promise<void> => {
@@ -302,6 +321,7 @@ export function App({
           },
         });
         setPendings(snap.pendingPermissions);
+        setScrollOffset(0);
         // open 先建立订阅再返回 snapshot。响应飞行期间的事件必须在
         // snapshot 之后按原顺序回放，不能只特判 permission_request。
         ready = true;
@@ -405,9 +425,25 @@ export function App({
     [host, providers, catalog, inspectProviderCredentials, selectModel, state.meta, state.running, exit],
   );
 
+  // 输入缓冲区与光标一起改写：ref 供同 tick 内连续编辑，state 供渲染。
+  const setBuf = useCallback((text: string, cur: number): void => {
+    const c = Math.max(0, Math.min(cur, text.length));
+    inputRef.current = text;
+    cursorRef.current = c;
+    setInput(text);
+    setCursor(c);
+  }, []);
+
   const submitLine = useCallback(
     (raw: string): void => {
+      setScrollOffset(0); // 提交后回到底部跟随最新
       const text = raw.trim();
+      if (text) {
+        const h = historyRef.current;
+        if (h[h.length - 1] !== text) h.push(text);
+        if (h.length > 200) h.shift();
+      }
+      histPosRef.current = null;
       if (!text) return;
       if (text.startsWith("/")) {
         void runSlash(text).catch((err) =>
@@ -429,6 +465,17 @@ export function App({
     // Ctrl+Z 退出（与 Ctrl+C 一致）；raw 模式下 Ctrl+Z 可能是 "z" 或 SUB 字符。
     if (key.ctrl && (ch === "z" || ch === "\u001a")) {
       exit();
+      return;
+    }
+    // 回看历史：PageUp 往上翻一屏，PageDown 往下；到底部即回到跟随最新。
+    if (key.pageUp) {
+      const page = Math.max(1, termRows - 2);
+      setScrollOffset((o) => Math.min(o + page, Math.max(0, state.items.length - 1)));
+      return;
+    }
+    if (key.pageDown) {
+      const page = Math.max(1, termRows - 2);
+      setScrollOffset((o) => Math.max(0, o - page));
       return;
     }
     if (picker) {
@@ -515,6 +562,48 @@ export function App({
       void host.interrupt(sessionId);
       return;
     }
+    const buf = inputRef.current;
+    const cur = cursorRef.current;
+    const isCtrl = (letter: string, code: string) =>
+      key.ctrl && (ch === letter || ch === code);
+
+    // —— 光标移动 ——
+    if (key.leftArrow) return setBuf(buf, cur - 1);
+    if (key.rightArrow) return setBuf(buf, cur + 1);
+    if (isCtrl("a", "")) return setBuf(buf, 0); // 行首
+    if (isCtrl("e", "")) return setBuf(buf, buf.length); // 行尾
+
+    // —— 历史回溯（↑ 往旧，↓ 往新，越过最新回到空行）——
+    if (key.upArrow) {
+      const h = historyRef.current;
+      if (h.length === 0) return;
+      const pos = Math.max(0, (histPosRef.current ?? h.length) - 1);
+      histPosRef.current = pos;
+      return setBuf(h[pos]!, h[pos]!.length);
+    }
+    if (key.downArrow) {
+      const h = historyRef.current;
+      if (histPosRef.current === null) return;
+      const pos = histPosRef.current + 1;
+      if (pos >= h.length) {
+        histPosRef.current = null;
+        return setBuf("", 0);
+      }
+      histPosRef.current = pos;
+      return setBuf(h[pos]!, h[pos]!.length);
+    }
+
+    // —— 删除 ——
+    if (isCtrl("u", "")) return setBuf(buf.slice(cur), 0); // 删到行首
+    if (isCtrl("k", "")) return setBuf(buf.slice(0, cur), cur); // 删到行尾
+    if (isCtrl("w", "")) {
+      // 删除光标前一个词：先吃掉空白，再吃掉非空白。
+      let i = cur;
+      while (i > 0 && /\s/.test(buf[i - 1]!)) i--;
+      while (i > 0 && !/\s/.test(buf[i - 1]!)) i--;
+      return setBuf(buf.slice(0, i) + buf.slice(cur), i);
+    }
+
     if (pasteSubmitRef.current) {
       clearTimeout(pasteSubmitRef.current);
       pasteSubmitRef.current = null;
@@ -526,33 +615,30 @@ export function App({
     if (pastedNewline) {
       // 单行 TUI：内部换行只折成空格；只有 paste 本身以换行结尾时才等价
       // 于 Enter。短 debounce 可合并落在相邻 event-loop tick 的 PTY chunks。
-      const next = inputRef.current + normalized.replace(/\n+/g, " ");
-      inputRef.current = next;
-      setInput(next);
+      const ins = normalized.replace(/\n+/g, " ");
+      histPosRef.current = null;
+      setBuf(buf.slice(0, cur) + ins + buf.slice(cur), cur + ins.length);
       if (normalized.endsWith("\n")) {
         const scheduled = setTimeout(() => {
           if (pasteSubmitRef.current !== scheduled) return;
           pasteSubmitRef.current = null;
           const text = inputRef.current;
-          inputRef.current = "";
-          setInput("");
+          setBuf("", 0);
           submitLine(text);
         }, 25);
         pasteSubmitRef.current = scheduled;
       }
     } else if (key.return) {
       const text = inputRef.current;
-      inputRef.current = "";
-      setInput("");
+      setBuf("", 0);
       submitLine(text);
     } else if (key.backspace || key.delete) {
-      const next = inputRef.current.slice(0, -1);
-      inputRef.current = next;
-      setInput(next);
+      if (cur === 0) return;
+      histPosRef.current = null;
+      setBuf(buf.slice(0, cur - 1) + buf.slice(cur), cur - 1);
     } else if (ch && !key.ctrl && !key.meta) {
-      const next = inputRef.current + normalized;
-      inputRef.current = next;
-      setInput(next);
+      histPosRef.current = null;
+      setBuf(buf.slice(0, cur) + normalized + buf.slice(cur), cur + normalized.length);
     }
   });
 
@@ -562,12 +648,17 @@ export function App({
     !state.liveText &&
     state.activeTools.size === 0;
 
-  // 只渲染贴底可见的尾部条目：屏幕至多容纳 termRows 行，取 2×termRows 个条目
-  // 足以覆盖可见区（历史条目不进 yoga 布局），把整棵树的布局代价与会话长度解耦。
-  const visibleItems = conversationEmpty
-    ? state.items
-    : state.items.slice(-(termRows * 2 + 16));
-  const baseKey = state.items.length - visibleItems.length;
+  // 只渲染可见窗口内的条目：窗口约 2×termRows 个（历史条目不进 yoga 布局），
+  // 把整棵树的布局代价与会话长度解耦。scrollOffset 决定窗口结束位置（0=贴底）。
+  const WIN = termRows * 2 + 16;
+  const winEnd = Math.max(1, state.items.length - scrollOffset);
+  const winStart = Math.max(0, winEnd - WIN);
+  const visibleItems = conversationEmpty ? state.items : state.items.slice(winStart, winEnd);
+  const baseKey = conversationEmpty ? 0 : winStart;
+
+  const spinner = state.running ? SPINNER[spin % SPINNER.length]! : "●";
+  const elapsedS =
+    state.running && runStartRef.current ? Math.floor((Date.now() - runStartRef.current) / 1000) : 0;
 
   return (
     <Box flexDirection="column" height={termRows}>
@@ -588,8 +679,13 @@ export function App({
 
         {state.liveText ? (
           <Box>
-            <Text color="green">● </Text>
+            <Text color="green">{spinner} </Text>
             <Text>{state.liveText}</Text>
+          </Box>
+        ) : state.running ? (
+          <Box>
+            <Text color="yellow">{spinner} </Text>
+            <Text dimColor>生成中… {elapsedS}s（esc 中断）</Text>
           </Box>
         ) : null}
 
@@ -599,6 +695,12 @@ export function App({
 
         {state.todos.length > 0 ? <TodoList todos={state.todos} /> : null}
       </Box>
+
+      {scrollOffset > 0 ? (
+        <Box justifyContent="center">
+          <Text color="cyan">↑ 回看历史中 · PageDown 回到底部</Text>
+        </Box>
+      ) : null}
 
       {sessions ? <SessionList sessions={sessions} /> : null}
 
@@ -627,11 +729,7 @@ export function App({
             flexDirection="column"
           >
             <Box>
-              {input ? (
-                <Text>{input}<Text inverse> </Text></Text>
-              ) : (
-                <Text dimColor>输入需求开始… 例如「修复一个失败的测试」<Text inverse> </Text></Text>
-              )}
+              <InputLine text={input} cursor={cursor} placeholder="输入需求开始… 例如「修复一个失败的测试」" />
             </Box>
             <Text>
               <Text color={state.running ? "yellow" : "cyan"}>● </Text>
@@ -642,7 +740,9 @@ export function App({
           </Box>
           <Box justifyContent="flex-end">
             <Text dimColor>
-              {state.running ? "esc 中断 · enter 追加" : "/model 换模型 · /help 命令 · ctrl+z 退出"}
+              {state.running
+                ? "esc 中断 · enter 追加"
+                : "/model 换模型 · ↑↓ 历史 · PageUp 回看 · ctrl+z 退出"}
             </Text>
           </Box>
         </Box>
@@ -999,13 +1099,21 @@ function TodoList({ todos }: { todos: TodoItem[] }) {
       <Text dimColor>任务清单</Text>
       {todos.map((todo, i) => {
         const mark = todo.status === "completed" ? "✔" : todo.status === "in_progress" ? "●" : "○";
+        const markColor =
+          todo.status === "completed" ? "green" : todo.status === "in_progress" ? "yellow" : "gray";
         const text = todo.status === "in_progress" && todo.activeForm ? todo.activeForm : todo.content;
         return (
-          <Text
-            key={`${i}:${todo.content}`}
-            {...(todo.status === "in_progress" ? { color: "yellow" as const } : {})}
-          >
-            {mark} {text}
+          <Text key={`${i}:${todo.content}`}>
+            <Text color={markColor as never}>{mark} </Text>
+            <Text
+              {...(todo.status === "in_progress"
+                ? { color: "yellow" as const, bold: true }
+                : todo.status === "completed"
+                  ? { dimColor: true }
+                  : {})}
+            >
+              {text}
+            </Text>
           </Text>
         );
       })}
@@ -1026,6 +1134,29 @@ function SessionList({ sessions }: { sessions: SessionSummary[] }) {
         </Text>
       ))}
     </Box>
+  );
+}
+
+// 单行输入渲染：把光标位置画成反显块；空串时显示占位提示且光标在最前。
+function InputLine({ text, cursor, placeholder }: { text: string; cursor: number; placeholder: string }) {
+  if (!text) {
+    return (
+      <Text dimColor>
+        <Text inverse> </Text>
+        {placeholder}
+      </Text>
+    );
+  }
+  const c = Math.max(0, Math.min(cursor, text.length));
+  const before = text.slice(0, c);
+  const at = text.slice(c, c + 1) || " ";
+  const after = text.slice(c + 1);
+  return (
+    <Text>
+      {before}
+      <Text inverse>{at}</Text>
+      {after}
+    </Text>
   );
 }
 

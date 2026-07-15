@@ -660,3 +660,57 @@ test("TUI transcript: 并行工具结果按 toolCallId 关联", () => {
     ],
   );
 });
+
+test("TUI: 输入框支持光标移动、Ctrl+W 删词与中间插入", async () => {
+  const sent: string[] = [];
+  const host = offlineHost({ onSend: (text) => sent.push(text) });
+  const view = render(<App host={host} cwd="/work" model="debug/demo" sessionId="s_edit" />);
+  await tick(80);
+
+  for (const ch of "hello world") view.stdin.write(ch);
+  await tick(20);
+  assert.match(view.lastFrame() ?? "", /hello world/);
+
+  view.stdin.write("\u0017"); // Ctrl+W 删除光标前一个词 "world"
+  await tick(20);
+  assert.doesNotMatch(view.lastFrame() ?? "", /world/);
+  assert.match(view.lastFrame() ?? "", /hello/);
+
+  // 回到行首（Ctrl+A）后在最前插入，验证中间插入而非只追加末尾
+  view.stdin.write("\u0001"); // Ctrl+A
+  await tick(10);
+  for (const ch of "say ") view.stdin.write(ch);
+  await tick(20);
+  view.stdin.write("\r");
+  await tick(40);
+  assert.deepEqual(sent, ["say hello"]);
+  view.unmount();
+});
+
+test("TUI: ↑/↓ 回溯已提交的输入历史", async () => {
+  const sent: string[] = [];
+  const host = offlineHost({ onSend: (text) => sent.push(text) });
+  const view = render(<App host={host} cwd="/work" model="debug/demo" sessionId="s_hist" />);
+  await tick(80);
+
+  for (const ch of "alpha") view.stdin.write(ch);
+  view.stdin.write("\r");
+  await tick(40);
+
+  // 未提交的 "beta" 只存在于输入框，可用来判定 ↑ 是否用历史项替换了它
+  for (const ch of "beta") view.stdin.write(ch);
+  await tick(20);
+  assert.match(view.lastFrame() ?? "", /beta/);
+
+  view.stdin.write("\u001b[A"); // ↑ 召回最近一次提交 "alpha"
+  await tick(20);
+  assert.doesNotMatch(view.lastFrame() ?? "", /beta/); // 输入框已被替换
+  assert.match(view.lastFrame() ?? "", /alpha/);
+
+  view.stdin.write("\u001b[B"); // ↓ 越过最新回到空行
+  await tick(20);
+  view.stdin.write("\r"); // 空行不提交
+  await tick(20);
+  assert.deepEqual(sent, ["alpha"]);
+  view.unmount();
+});
