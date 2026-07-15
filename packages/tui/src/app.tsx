@@ -665,52 +665,48 @@ export function App({
   const elapsedS =
     state.running && runStartRef.current ? Math.floor((Date.now() - runStartRef.current) / 1000) : 0;
 
-  return (
-    <Box flexDirection="column" height={termRows}>
-      {/* 内容区弹性铺满：有对话时贴底（最新可见）；空会话时贴顶（logo 在上）。 */}
-      <Box
-        flexGrow={1}
-        flexDirection="column"
-        overflow="hidden"
-        justifyContent={conversationEmpty ? "flex-start" : "flex-end"}
-      >
-        {visibleItems.map((item, i) =>
-          item.kind === "logo" ? (
-            <Welcome key={baseKey + i} />
-          ) : (
-            <ItemView key={baseKey + i} item={item} />
-          ),
-        )}
-
-        {state.liveText ? (
+  // 输入框簇（含底部提示）；被授权弹窗/选择器接管时不渲染。
+  const inputCluster =
+    !pendings[0] && !picker ? (
+      <Box flexDirection="column" marginTop={1} marginBottom={1}>
+        <Box
+          borderStyle="single"
+          borderColor={state.running ? "gray" : "cyan"}
+          borderTop={false}
+          borderRight={false}
+          borderBottom={false}
+          paddingLeft={1}
+          paddingTop={1}
+          paddingBottom={1}
+          flexDirection="column"
+        >
           <Box>
-            <Text color="green">{spinner} </Text>
-            <Text>{state.liveText}</Text>
+            <InputLine text={input} cursor={cursor} placeholder="输入需求开始… 例如「修复一个失败的测试」" />
           </Box>
-        ) : state.running ? (
-          <Box>
-            <Text color="yellow">{spinner} </Text>
-            <Text dimColor>生成中… {elapsedS}s（esc 中断）</Text>
+          <Box marginTop={1}>
+            <Text>
+              <Text color={state.running ? "yellow" : "cyan"}>{spinner} </Text>
+              <Text color="white">{state.meta.model}</Text>
+              <Text dimColor> · {basename(state.meta.cwd)}</Text>
+              {state.meta.title ? <Text dimColor> · {truncate(state.meta.title, 20)}</Text> : null}
+            </Text>
           </Box>
-        ) : null}
-
-        {[...state.activeTools.values()].map((tool) => (
-          <ItemView key={tool.id} item={tool} />
-        ))}
-
-        {state.todos.length > 0 ? <TodoList todos={state.todos} /> : null}
-      </Box>
-
-      {scrollOffset > 0 ? (
-        <Box justifyContent="center">
-          <Text color="cyan">↑ 回看历史中 · PageDown 回到底部</Text>
         </Box>
-      ) : null}
+        <Box justifyContent="flex-end">
+          <Text dimColor>
+            {state.running
+              ? "esc 中断 · enter 追加"
+              : "/model 换模型 · ↑↓ 历史 · PageUp 回看 · ctrl+z 退出"}
+          </Text>
+        </Box>
+      </Box>
+    ) : null;
 
+  // 底部控件：会话列表 / 选择器 / 授权弹窗 / 输入框（互斥地占据同一位置）。
+  const controls = (
+    <>
       {sessions ? <SessionList sessions={sessions} /> : null}
-
       {picker ? <ModelPicker rows={picker.rows} index={picker.index} filter={picker.filter} /> : null}
-
       {pendings[0] ? (
         <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
           <Text color="yellow">
@@ -721,36 +717,60 @@ export function App({
           <Text>[<Text color="green">y</Text>] 允许 [<Text color="cyan">a</Text>] 允许并记住 [<Text color="red">n</Text>] 拒绝</Text>
         </Box>
       ) : null}
+      {inputCluster}
+    </>
+  );
 
-      {!pendings[0] && !picker && (
-        <Box flexDirection="column" marginTop={1}>
-          <Box
-            borderStyle="single"
-            borderColor={state.running ? "gray" : "cyan"}
-            borderTop={false}
-            borderRight={false}
-            borderBottom={false}
-            paddingLeft={1}
-            flexDirection="column"
-          >
-            <Box>
-              <InputLine text={input} cursor={cursor} placeholder="输入需求开始… 例如「修复一个失败的测试」" />
+  return (
+    <Box flexDirection="column" height={termRows}>
+      {conversationEmpty ? (
+        // 空会话：顶部保留会话边界，logo + 输入框作为一组在垂直方向居中（对齐 opencode）。
+        <>
+          {state.items
+            .filter((i) => i.kind !== "logo")
+            .map((item, i) => (
+              <ItemView key={`top:${i}`} item={item as Item} />
+            ))}
+          <Box flexGrow={1} flexDirection="column" justifyContent="center">
+            <Welcome />
+            {controls}
+          </Box>
+        </>
+      ) : (
+        <>
+          {/* 会话进行中：记录贴底（最新可见），输入框固定在下方。 */}
+          <Box flexGrow={1} flexDirection="column" overflow="hidden" justifyContent="flex-end">
+            {visibleItems.map((item, i) =>
+              item.kind === "logo" ? null : <ItemView key={baseKey + i} item={item} />,
+            )}
+
+            {state.liveText ? (
+              <Box>
+                <Text color="green">{spinner} </Text>
+                <Text>{state.liveText}</Text>
+              </Box>
+            ) : state.running ? (
+              <Box>
+                <Text color="yellow">{spinner} </Text>
+                <Text dimColor>生成中… {elapsedS}s（esc 中断）</Text>
+              </Box>
+            ) : null}
+
+            {[...state.activeTools.values()].map((tool) => (
+              <ItemView key={tool.id} item={tool} />
+            ))}
+
+            {state.todos.length > 0 ? <TodoList todos={state.todos} /> : null}
+          </Box>
+
+          {scrollOffset > 0 ? (
+            <Box justifyContent="center">
+              <Text color="cyan">↑ 回看历史中 · PageDown 回到底部</Text>
             </Box>
-            <Text>
-              <Text color={state.running ? "yellow" : "cyan"}>● </Text>
-              <Text color="white">{state.meta.model}</Text>
-              <Text dimColor> · {basename(state.meta.cwd)}</Text>
-              {state.meta.title ? <Text dimColor> · {truncate(state.meta.title, 20)}</Text> : null}
-            </Text>
-          </Box>
-          <Box justifyContent="flex-end">
-            <Text dimColor>
-              {state.running
-                ? "esc 中断 · enter 追加"
-                : "/model 换模型 · ↑↓ 历史 · PageUp 回看 · ctrl+z 退出"}
-            </Text>
-          </Box>
-        </Box>
+          ) : null}
+
+          {controls}
+        </>
       )}
 
       <Box flexDirection="column" marginTop={1}>
@@ -1064,20 +1084,17 @@ function wordmarkRows(word: string): string[] {
 }
 
 function Welcome() {
-  // 对齐 opencode 的双色 wordmark：前段灰、后段亮白。
+  // 对齐 opencode 的双色 wordmark：前段中灰、后段浅灰（无亮白、无加粗、无文案）。
   const head = wordmarkRows("ani");
   const tail = wordmarkRows("code");
   return (
-    <Box flexDirection="column" alignItems="center" marginTop={1} marginBottom={1}>
+    <Box flexDirection="column" alignItems="center">
       {head.map((row, i) => (
         <Text key={i}>
-          <Text color="gray">{row}</Text>
-          <Text color="white" bold>{tail[i]}</Text>
+          <Text color="#6b6b6b">{row}</Text>
+          <Text color="#b0b0b0">{tail[i]}</Text>
         </Text>
       ))}
-      <Box marginTop={1}>
-        <Text dimColor>anicode · 自研 AI coding agent</Text>
-      </Box>
     </Box>
   );
 }
