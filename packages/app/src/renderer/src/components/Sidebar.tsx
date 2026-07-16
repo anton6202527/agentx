@@ -1,5 +1,6 @@
 import React from "react";
-import { t, type SessionSummary } from "@anicode/core";
+import type { SessionSummary } from "@anicode/core";
+import { t } from "@anicode/core/i18n";
 
 export type View = "chat" | "marketplace" | "settings";
 

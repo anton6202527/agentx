@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { t, type ProviderDescriptor, type SessionSummary } from "@anicode/core";
+import type { ProviderDescriptor, SessionSummary } from "@anicode/core";
+import { t } from "@anicode/core/i18n";
 import type { AppInfo, ModelRow, PluginEntry, UserModel } from "../../shared/api.js";
 import { Sidebar, type View } from "./components/Sidebar.js";
 import { ChatView } from "./components/ChatView.js";

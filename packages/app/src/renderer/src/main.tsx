@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { t } from "@anicode/core";
+import { t } from "@anicode/core/i18n";
 import { App } from "./App.js";
 import "./styles.css";
 

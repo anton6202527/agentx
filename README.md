@@ -5,6 +5,7 @@
 ```text
 packages/
   core/     Provider、Agent loop、工具、权限、会话与 daemon
+  eval/     真实 agent loop 的可校验编辑任务与质量指标
   shared/   前端共享的纯逻辑：transcript 重建、Markdown 解析、行级 diff
   tui/      基于 Ink 的终端界面
   app/      基于 Electron 的桌面应用（ChatGPT 风格 UI + 插件市场）
@@ -15,7 +16,7 @@ packages/
 Electron IPC、VSCode webview postMessage 只是同一契约的不同「传输」实现，可互换。transcript / Markdown /
 diff 等前端无关的纯逻辑集中在 `@anicode/shared`，三端共用、单独测试。
 
-当前全仓类型检查通过，离线测试 **core 166 + shared 6 + TUI 32 + app 16 + vscode 8，共 228 个**。测试不需要真实 API key。
+当前全仓类型检查通过，离线测试 **core 211 + eval 4 + shared 6 + TUI 50 + app 16 + vscode 8，共 295 个**。测试不需要真实 API key。
 
 ## 先本地调试 TUI
 
@@ -54,6 +55,9 @@ TUI 内可用命令：
 /sessions
 /resume <sessionId>
 /new [标题]
+/undo                     # 撤销上一轮文件改动（对话不回滚）
+/plan [on|off]            # 只读规划模式
+/lang <en|zh>             # 运行时切换中英文
 /exit
 ```
 
@@ -225,11 +229,14 @@ registerOpenAICompatibleProvider({
 - **环境接地**：会话开始时快照 `<env>`（cwd/平台/系统/日期/是否 git 仓库/当前分支）+ `<git-status>`（工作区改动与最近提交）注入 system，缓存友好，让模型不再盲飞。见 `env.ts`。
 - 模型能力驱动请求：按 profile 控制 tools、reasoning、输出上限和 compaction 阈值；未知兼容模型不会被强塞 16k 输出参数。
 - 子 agent 的 `provider/model` override 会重新解析 provider，不再错误复用父 provider。
-- 默认工具：`read / write / edit / glob / grep / bash / webfetch / todo_write / task / skill`。
+- 默认工具：`read / write / edit / apply_patch / glob / grep / bash / webfetch / todo_write / task / skill`；配置 LSP 后追加 `diagnostics`。
+- **repo map**：会话开始时按 token 预算注入关键文件与顶层符号签名，基于跨文件引用词频排序，减少首次定位时的盲目检索。
+- **结构化补丁**：`apply_patch` 支持一次增/改/删多个文件，带精确定位、空白容差与最接近片段错误提示。
 - **ripgrep 后端检索**：检测到 `rg` 时 grep/glob 走 ripgrep（尊重 .gitignore、跳过二进制、按 mtime 排序），无 rg 自动回退纯 JS。grep 支持 `output_mode`（content/files_with_matches/count）、`ignore_case`、`context` 前后行、`path`/`glob` 限定。
 - **read 加固**：NUL 字节识别二进制（不返回乱码）、超长单行截断（防炸上下文）。
 - **重试尊重 `Retry-After`**：429/503 带该头时按服务端节流等待（与指数退避取较大值，封顶 60s）。
-- 权限模式：`default / acceptEdits / auto / bypass`，支持 allow/ask/deny glob 规则和运行时记忆。
+- 权限模式：`default / acceptEdits / auto / bypass / plan`，支持 allow/ask/deny glob 规则和运行时记忆；`plan` 只放行只读工具。
+- 每轮可创建 git 工作区快照，TUI 用 `/undo` 恢复文件；macOS Seatbelt 与 Linux bubblewrap 可为 Bash 提供 OS 级沙箱。
 - 项目记忆：向上发现 `AGENTS.md` / `CLAUDE.md`，止于 `.git` 边界。
 - 两级 compaction：先清理旧工具输出，再在安全边界生成摘要，保持 tool call/result 配对。
 - JSONL 会话持久化、resume、最近活跃排序、悬空工具调用自愈。
@@ -276,28 +283,38 @@ npm run start --workspace @anicode/tui -- --daemon --resume <sessionId>
 ## 验证
 
 ```bash
+npm run format:check
+npm run lint
 npm run typecheck
 npm test
+npm run build:cli
+npm run build:app
+npm run build:vscode
 ```
 
-当前覆盖 228 个离线测试，包括 provider 映射和真实本地 SSE/HTTP header fixture、工具调用、重试（含 `Retry-After` 解析）、权限、hooks、skills、subagents、compaction、沙箱路径检查、环境接地渲染、ripgrep/JS 双后端检索（grep 各输出模式、read 二进制/长行加固）、私有会话权限、会话竞态、daemon 多客户端与大快照，以及 Ink TUI 交互。
+当前覆盖 295 个离线测试，包括 provider 映射和真实本地 SSE/HTTP header fixture、工具调用、重试（含 `Retry-After` 解析）、权限与 Plan 模式、hooks、skills、并行只读子代理、compaction、repo map、结构化补丁、检查点回滚、macOS/Linux 沙箱、环境接地渲染、ripgrep/JS 双后端检索、私有会话权限、会话竞态、daemon 多客户端与大快照，以及三端 UI 交互。
+
+`@anicode/eval` 还提供带自校验的真实编辑任务，可汇总通过率、轮数、token 与编辑失败率：
+
+```bash
+npm run eval --workspace @anicode/eval -- --model <provider/model>
+npm run eval --workspace @anicode/eval -- --model <provider/model> --json out.json
+```
 
 ## 采各家之所长（对标 Claude Code / Codex / opencode / Aider·Cline 的增强）
 
 - **小模型路由（Claude Code）**：摘要压缩等杂活自动走便宜快速模型（`SessionManagerOptions.smallModel: true` 按 provider 推导，如 anthropic→haiku、groq→llama-3.1-8b），解析失败静默回退主模型。省这类调用 70–80% 成本。见 `provider/registry.ts` 的 `defaultSmallModel`、`agent.ts` 的 `streamText`。
 - **编辑自愈 + 反射（Aider/Cline）**：`edit` 精确匹配失败时退到「按行去空白」的模糊匹配；全都匹配不上则抛出附「文件中最接近片段」的反射式错误，让模型据此自我纠正（Aider 经验：关掉自愈编辑错误率数倍上升）。见 `tools/fs.ts` 的 `applyEdit`。
-- **macOS 沙箱第一阶段（Codex/Claude Code）**：bash 可选用 Seatbelt `sandbox-exec` 包裹——只放行「工作区 + 临时目录」写入、默认断网，纵深防御 prompt 注入。opt-in：`AGENTX_BASH_SANDBOX=workspace-write`（或 `SessionManagerOptions.sandbox`）。非 macOS 自动裸跑。见 `tools/sandbox.ts`。已实测：越界写被拒、出网被拒、工作区内写正常。
+- **跨平台 OS 沙箱（Codex/Claude Code）**：bash 可选用 macOS Seatbelt 或 Linux bubblewrap 包裹——只放行「工作区 + 临时目录」写入，可禁网，并把 `.git` 收紧为只读。见 `tools/sandbox.ts`。
 - **工程化系统提示 + 环境接地（Claude Code/Codex）**：把「先探后改、工具路由、并行批处理、最小改动、改完自验证」写进默认系统提示，并在会话开始注入 `<env>` + `<git-status>` 快照。这是把通用模型行为收敛到「优秀 coding agent」的最大杠杆，且缓存友好。见 `agent.ts`、`env.ts`。
 - **ripgrep 检索后端（Claude Code）**：grep/glob 优先走 ripgrep（尊重 .gitignore、跳过二进制、mtime 排序），支持输出模式/上下文行/大小写；无 rg 回退 JS。检索更快、结果更规整。见 `tools/ripgrep.ts`、`tools/fs.ts`。
 
 ## 安全边界与下一步
 
-路径工具会阻止 `..` 和符号链接逃逸；shell 权限会保守解析复合命令；macOS 上可开启 Seatbelt 沙箱（见上）。后续：Linux bubblewrap/Landlock、以及「先沙箱后询问、撞墙才升级」的 Codex 双轴审批闭环。
+路径工具会阻止 `..` 和符号链接逃逸；shell 权限会保守解析复合命令；macOS/Linux 可开启 OS 沙箱（见上）。后续仍可补 Landlock，以及「先沙箱后询问、撞墙才升级」的双轴审批闭环。
 
 后续优先级（据架构评审，均为需要动结构的较大项，故单独列出）：
 
 1. **多模态 read**：工具结果目前只回文本；让 `read` 能返回图片内容块（截图/图表），配合已支持 image 的 provider，是多模态 agent 的关键缺口。
-2. **结构化编辑**：引入 `multi_edit` 或 Codex 风格 `apply_patch`（一次原子多处改动 + 统一 diff 格式），减少多次 edit 往返。
-3. OS 沙箱补齐 Linux（bubblewrap/Landlock）+ 双轴审批（sandbox-first, approve-on-failure）。
-4. 工作区检查点（shadow-git undo）/ Plan 模式。
-5. daemon 升级为 HTTP+SSE + OpenAPI 生成 SDK；结构化 headless 输出、延迟工具加载（ToolSearch）。
+2. **双轴审批**：在现有 OS 沙箱与权限规则上补 sandbox-first / approve-on-failure，并评估 Linux Landlock。
+3. daemon 升级为 HTTP+SSE + OpenAPI 生成 SDK；结构化 headless 输出、延迟工具加载（ToolSearch）。

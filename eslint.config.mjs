@@ -51,6 +51,26 @@ export default tseslint.config(
     },
   },
   {
+    // Electron renderer 不能从 core 主入口取运行时值，否则会把 Node-only 模块拖进浏览器 bundle。
+    // 类型导入可保留；轻量运行时能力走显式子路径（例如 @anicode/core/i18n）。
+    files: ["packages/app/src/renderer/**/*.{ts,tsx}", "packages/app/src/shared/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@anicode/core",
+              allowTypeImports: true,
+              message:
+                "Renderer/shared runtime imports must use a browser-safe @anicode/core subpath.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // 测试与脚本更宽松：允许非空断言、空函数等测试惯用写法。
     files: ["**/*.test.ts", "**/*.test.tsx", "**/testutil/**", "**/demo.ts"],
     rules: {

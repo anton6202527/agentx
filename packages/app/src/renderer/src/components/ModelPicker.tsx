@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { t } from "@anicode/core";
+import { t } from "@anicode/core/i18n";
 import type { ModelRow } from "../../../shared/api.js";
 
 interface Props {

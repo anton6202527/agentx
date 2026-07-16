@@ -4,8 +4,8 @@
  */
 
 import { useEffect, useReducer, useRef } from "react";
-import { t } from "@anicode/core";
 import type { SessionEvent, SessionMeta, TodoItem, Usage } from "@anicode/core";
+import { t } from "@anicode/core/i18n";
 import { messagesToItems, todosFromMessages, type Item } from "./transcript.js";
 
 export interface PendingPerm {

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { t } from "@anicode/core";
+import { t } from "@anicode/core/i18n";
 import type { PluginEntry, PluginCategory } from "../../../shared/plugins.js";
 
 interface Props {

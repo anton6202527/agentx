@@ -4,7 +4,7 @@
  */
 
 import React, { useState } from "react";
-import { t } from "@anicode/core";
+import { t } from "@anicode/core/i18n";
 import { parseMarkdown, type MdBlock, type Span } from "@anicode/shared";
 
 export function Markdown({ text }: { text: string }) {

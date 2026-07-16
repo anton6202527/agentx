@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useRef, useState } from "react";
-import { t } from "@anicode/core";
+import { t } from "@anicode/core/i18n";
 
 interface Props {
   running: boolean;

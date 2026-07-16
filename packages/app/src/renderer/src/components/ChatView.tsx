@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from "react";
-import { t } from "@anicode/core";
+import { t } from "@anicode/core/i18n";
 import type { ChatState, PendingPerm } from "../useSession.js";
 import type { Item } from "../transcript.js";
 import { Markdown } from "../markdown.js";
