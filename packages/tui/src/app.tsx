@@ -8,7 +8,7 @@
  */
 
 import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { Box, Text, useApp, useInput, useStdout } from "ink";
+import { Box, Text, useApp, useInput, useStdout, type DOMElement } from "ink";
 import { probeLocalProviders, expandCommand } from "@anicode/core";
 import type {
   ChatMessage,
@@ -139,6 +139,56 @@ export const APP_NAME = "anicode";
 // 生成中的 braille spinner 帧（对齐 opencode 的动画指示手感）。
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/** 元素相对整帧顶端的行号：yoga 只给出相对父节点的偏移，逐级累加即绝对行。 */
+function absoluteTop(el: DOMElement): number {
+  let top = 0;
+  for (let n: DOMElement | undefined = el; n; n = n.parentNode) {
+    top += n.yogaNode?.getComputedTop() ?? 0;
+  }
+  return top;
+}
+
+/**
+ * 把终端真实光标停在输入框插入点上。
+ *
+ * 输入法候选框由终端按真实光标位置弹出，而 Ink 画完一帧后光标停在画面末尾，
+ * 中文候选框因此卡在右下角。我们整帧高度 = 终端高度，Ink 走 clearTerminal 分支：
+ * 每帧先 `ESC[2J ESC[3J ESC[H` 归位再从第 1 行重画，故帧内行号 == 终端行号，
+ * 可以直接按绝对坐标停放光标，也不会干扰下一帧的重画起点。
+ *
+ * onRender 有 32ms 节流、可能晚于 React effect 触发，所以这里包住 stdout.write：
+ * 每次写出前藏起光标、写完后按最新坐标重新停放。返回值需在每次提交后调用以更新坐标。
+ */
+function useCaretPark(): (target: { row: number; col: number } | null) => void {
+  const targetRef = useRef<{ row: number; col: number } | null>(null);
+  const parkRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    const out = process.stdout;
+    if (!out.isTTY) return;
+    const orig = out.write.bind(out) as (...args: unknown[]) => boolean;
+    const park = () => {
+      const t = targetRef.current;
+      if (t) orig(`\x1b[${t.row};${t.col}H\x1b[?25h`);
+    };
+    parkRef.current = park;
+    out.write = function (...args: unknown[]) {
+      orig("\x1b[?25l");
+      const ret = orig(...args);
+      park();
+      return ret;
+    } as NodeJS.WriteStream["write"];
+    return () => {
+      out.write = orig as NodeJS.WriteStream["write"];
+      parkRef.current = () => {};
+      orig("\x1b[?25l");
+    };
+  }, []);
+  return useCallback((target) => {
+    targetRef.current = target;
+    parkRef.current();
+  }, []);
+}
+
 /** 终端尺寸（rows/cols）；resize 时更新。非 TTY（测试）给合理默认值。 */
 function useTerminalSize(): { rows: number; cols: number } {
   const { stdout } = useStdout();
@@ -203,8 +253,8 @@ export function App({
     const out = process.stdout;
     if (!out.isTTY) return;
     out.write("\x1b[?1049h\x1b[H");
-    // 整屏背景对齐 opencode（主 #393939）；选区配色对齐 VS Code（#264f78/#dcdcdc）。
-    out.write("\x1b]11;#393939\x07");
+    // 整屏背景对齐 opencode（近纯黑 #0a0a0a）；选区配色对齐 VS Code（#264f78/#dcdcdc）。
+    out.write("\x1b]11;#0a0a0a\x07");
     out.write("\x1b]17;#264f78\x07\x1b]19;#dcdcdc\x07");
     return () => {
       out.write("\x1b]111\x07"); // 复位背景
@@ -227,6 +277,9 @@ export function App({
   const [input, setInput] = useState("");
   // 光标位置（0..input.length）。用 ref 与渲染态双写，保证同 tick 内多次编辑基于最新值。
   const [cursor, setCursor] = useState(0);
+  // 输入面板节点 + 真实光标停放（输入法候选框跟随真实光标）。
+  const panelRef = useRef<DOMElement | null>(null);
+  const setCaret = useCaretPark();
   const cursorRef = useRef(0);
   // 已提交行的历史，供 ↑/↓ 回溯（最新在末尾）。histRef 为当前浏览位置（null=不在浏览）。
   const historyRef = useRef<string[]>([]);
@@ -710,6 +763,15 @@ export function App({
     }
   });
 
+  // 每次提交后按最新布局把真实光标停到插入点：面板首行是空行，输入行在其下一行；
+  // 列 = 竖条(1) + 前导空格(1) + 光标在可见窗口内的列偏移，再 +1 转成 1-based。
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return setCaret(null);
+    const { caretX, startX } = inputView(input, cursor, termCols);
+    setCaret({ row: absoluteTop(panel) + 2, col: 3 + caretX - startX });
+  });
+
   const u = state.usage;
   const conversationEmpty =
     !state.items.some((i) => i.kind === "user" || i.kind === "assistant" || i.kind === "tool") &&
@@ -748,6 +810,7 @@ export function App({
     !pendings[0] && !picker ? (
       <Box flexDirection="column" marginTop={1} marginBottom={1}>
         <InputPanel
+          panelRef={panelRef}
           text={input}
           cursor={cursor}
           model={state.meta.model}
@@ -758,14 +821,21 @@ export function App({
           width={termCols}
         />
         <Box justifyContent="flex-end">
-          <Text dimColor>
-            {state.running
-              ? "esc 中断 · enter 追加"
-              : "/model 换模型 · ↑↓ 历史 · PageUp 回看 · ctrl+z 退出"}
+          <Text dimColor wrap="truncate">
+            {fitHints(
+              state.running
+                ? ["esc 中断", "enter 追加"]
+                : ["/model 换模型", "↑↓ 历史", "PageUp 回看", "ctrl+z 退出"],
+              termCols,
+            )}
           </Text>
         </Box>
       </Box>
     ) : null;
+
+  // 底部状态栏（窄屏下逐段让位，避免折行把整屏布局顶掉）。
+  const brand = `${APP_NAME} v${version}`;
+  const statusLine = `${state.meta.model} · in ${u.inputTokens} / out ${u.outputTokens} tokens`;
 
   // 底部控件：会话列表 / 选择器 / 授权弹窗 / 输入框（互斥地占据同一位置）。
   const controls = (
@@ -796,7 +866,7 @@ export function App({
               <ItemView key={`top:${i}`} item={item as Item} />
             ))}
           <Box flexGrow={1} flexDirection="column" justifyContent="center">
-            <Welcome />
+            <Welcome width={termCols} />
             {controls}
           </Box>
         </>
@@ -839,10 +909,13 @@ export function App({
 
       <Box flexDirection="column" marginTop={1}>
         <Box justifyContent="space-between">
-          <Text dimColor>{tildify(state.meta.cwd)}</Text>
-          <Text dimColor>{APP_NAME} v{version}</Text>
+          {/* 版本号定宽先占位，路径拿剩下的列；路径从头部截断，保留更有信息量的尾巴 */}
+          <Text dimColor wrap="truncate">
+            {truncWidthStart(tildify(state.meta.cwd), termCols - dispWidth(brand) - 1)}
+          </Text>
+          <Text dimColor wrap="truncate">{brand}</Text>
         </Box>
-        <Text dimColor>{state.meta.model} · in {u.inputTokens} / out {u.outputTokens} tokens</Text>
+        <Text dimColor wrap="truncate">{truncWidth(statusLine, termCols)}</Text>
       </Box>
     </Box>
   );
@@ -1079,7 +1152,7 @@ async function probeLive(
 const PICKER_HL = "#f6b17a";
 
 /** 终端显示宽度：CJK/全角/emoji 记 2，其余记 1（用于高亮行的整行铺底对齐）。 */
-function dispWidth(s: string): number {
+export function dispWidth(s: string): number {
   let w = 0;
   for (const ch of s) {
     const c = ch.codePointAt(0) ?? 0;
@@ -1104,6 +1177,7 @@ function dispWidth(s: string): number {
 /** 按显示宽度截断（保证高亮行不因超宽而折行）。 */
 function truncWidth(s: string, max: number): string {
   if (dispWidth(s) <= max) return s;
+  if (max <= 0) return ""; // 省略号本身占 1 格，预算为 0 时只能什么都不画
   let out = "";
   let w = 0;
   for (const ch of s) {
@@ -1113,6 +1187,29 @@ function truncWidth(s: string, max: number): string {
     w += cw;
   }
   return out + "…";
+}
+
+/** 同 truncWidth，但保留尾部、省略号放在头部（路径的尾巴比头部有信息量）。 */
+function truncWidthStart(s: string, max: number): string {
+  if (dispWidth(s) <= max) return s;
+  if (max <= 0) return "";
+  const chars = [...s];
+  let out = "";
+  let w = 0;
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const cw = dispWidth(chars[i]!);
+    if (w + cw > max - 1) break;
+    out = chars[i]! + out;
+    w += cw;
+  }
+  return "…" + out;
+}
+
+/** 提示条：按 " · " 连接，放不下就从尾部整条丢弃——截成半截词没有意义。 */
+function fitHints(hints: readonly string[], width: number): string {
+  let n = hints.length;
+  while (n > 0 && dispWidth(hints.slice(0, n).join(" · ")) > width) n--;
+  return hints.slice(0, n).join(" · ");
 }
 
 function ModelPicker({
@@ -1224,16 +1321,16 @@ function ProviderHeader({ name }: { name: string }) {
 
 // ---------- 欢迎页 logo ----------
 
-// 7 行厚描边块字，字高与 opencode wordmark 接近。
-const GLYPH_H = 7;
+// 5 行厚描边块字。
+const GLYPH_H = 5;
 const LOGO_GLYPHS: Record<string, string[]> = {
-  a: [" ████ ", "██  ██", "██  ██", "██████", "██  ██", "██  ██", "██  ██"],
-  n: ["██  ██", "██  ██", "███ ██", "██████", "██ ███", "██  ██", "██  ██"],
-  i: ["██████", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "  ██  ", "██████"],
-  c: [" █████", "██   █", "██    ", "██    ", "██    ", "██   █", " █████"],
-  o: [" ████ ", "██  ██", "██  ██", "██  ██", "██  ██", "██  ██", " ████ "],
-  d: ["█████ ", "██  ██", "██  ██", "██  ██", "██  ██", "██  ██", "█████ "],
-  e: ["██████", "██    ", "██    ", "█████ ", "██    ", "██    ", "██████"],
+  a: [" ████ ", "██  ██", "██████", "██  ██", "██  ██"],
+  n: ["██  ██", "███ ██", "██████", "██ ███", "██  ██"],
+  i: ["██████", "  ██  ", "  ██  ", "  ██  ", "██████"],
+  c: [" █████", "██    ", "██    ", "██    ", " █████"],
+  o: [" ████ ", "██  ██", "██  ██", "██  ██", " ████ "],
+  d: ["█████ ", "██  ██", "██  ██", "██  ██", "█████ "],
+  e: ["██████", "██    ", "█████ ", "██    ", "██████"],
 };
 
 function wordmarkRows(word: string): string[] {
@@ -1245,16 +1342,27 @@ function wordmarkRows(word: string): string[] {
   return rows;
 }
 
-function Welcome() {
+/** 取 s 在 [from, to) 这段全局列区间内的可见部分；s 自身占据 [offset, offset+s.length)。 */
+function clipSegment(s: string, offset: number, from: number, to: number): string {
+  const a = Math.max(from, offset);
+  const b = Math.min(to, offset + s.length);
+  return b <= a ? "" : s.slice(a - offset, b - offset);
+}
+
+export function Welcome({ width }: { width: number }) {
   // 对齐 opencode 的双色 wordmark：前段中灰、后段浅灰（无亮白、无加粗、无文案）。
   const head = wordmarkRows("ani");
   const tail = wordmarkRows("code");
+  // 窄屏时不压缩、不折行：以整体居中为准裁掉两侧溢出的列（对齐 opencode）。
+  const logoW = (head[0]?.length ?? 0) + (tail[0]?.length ?? 0);
+  const from = Math.max(0, Math.floor((logoW - width) / 2));
+  const to = from + Math.min(width, logoW);
   return (
     <Box flexDirection="column" alignItems="center">
       {head.map((row, i) => (
-        <Text key={i}>
-          <Text color="#6b6b6b">{row}</Text>
-          <Text color="#b0b0b0">{tail[i]}</Text>
+        <Text key={i} wrap="truncate">
+          <Text color="#6b6b6b">{clipSegment(row, 0, from, to)}</Text>
+          <Text color="#b0b0b0">{clipSegment(tail[i] ?? "", row.length, from, to)}</Text>
         </Text>
       ))}
     </Box>
@@ -1344,16 +1452,68 @@ function InputLine({ text, cursor, placeholder }: { text: string; cursor: number
   );
 }
 
-// opencode 同款输入面板：整块 #454545 底色、左侧青色竖条，撑满整行宽度。
-const PANEL_BG = "#454545";
+// opencode 同款输入面板：整块底色比屏底稍亮一档、左侧青色竖条，撑满整行宽度。
+const PANEL_BG = "#1e1e1e";
 const PANEL_BAR = "#22d3ee";
 const PANEL_PLACEHOLDER = "输入需求开始… 例如「修复一个失败的测试」";
+const PANEL_DIM = "#9a9a9a";
 
 function pad(width: number, used: number): string {
   return " ".repeat(Math.max(0, width - used));
 }
 
-function InputPanel({
+/** 按显示列取 s 的 [from, to) 段；宽字符被窗口边界劈开时用空格占位，避免整行错列。 */
+function sliceCols(s: string, from: number, to: number): string {
+  let x = 0;
+  let out = "";
+  for (const ch of s) {
+    const start = x;
+    const end = x + dispWidth(ch);
+    x = end;
+    if (end <= from || start >= to) continue;
+    out += start < from || end > to ? " ".repeat(Math.min(end, to) - Math.max(start, from)) : ch;
+  }
+  return out;
+}
+
+type Seg = { t: string; color: string };
+
+/** 按列预算依次裁剪各段：整段放得下就原样，跨越边界的那段截断，之后的整段丢弃。 */
+function fitSegments(segs: Seg[], budget: number): Seg[] {
+  const out: Seg[] = [];
+  let left = budget;
+  for (const s of segs) {
+    if (left <= 0) break;
+    const w = dispWidth(s.t);
+    if (w <= left) {
+      out.push(s);
+      left -= w;
+    } else {
+      out.push({ ...s, t: truncWidth(s.t, left) });
+      left = 0;
+    }
+  }
+  return out;
+}
+
+/**
+ * 输入行的水平滚动窗口。单行输入放不下时不折行（会撑破面板）也不截断（会看不见正在敲的字），
+ * 而是让窗口跟着光标走：文本放得下就从头显示，放不下就把光标块钉在右边缘。
+ * App 用它算真实光标该停在第几列，InputPanel 用它取可见片段——两边必须同一套算法。
+ */
+export function inputView(text: string, cursor: number, width: number) {
+  const avail = Math.max(1, width - 2); // 竖条 + 前导空格之后留给文本的列数
+  const c = Math.max(0, Math.min(cursor, text.length));
+  const caretX = dispWidth(text.slice(0, c));
+  const at = text.slice(c, c + 1) || " "; // 文末光标是一个空块
+  const endX = caretX + dispWidth(at);
+  const totalX = Math.max(dispWidth(text), endX);
+  const startX = totalX <= avail ? 0 : Math.min(caretX, Math.max(0, endX - avail));
+  return { avail, caretX, at, endX, startX };
+}
+
+export function InputPanel({
+  panelRef,
   text,
   cursor,
   model,
@@ -1363,6 +1523,7 @@ function InputPanel({
   spinner,
   width,
 }: {
+  panelRef?: React.Ref<DOMElement>;
   text: string;
   cursor: number;
   model: string;
@@ -1380,51 +1541,52 @@ function InputPanel({
   );
 
   // 输入行内容（不含左侧竖条）：前导空格 + 文本/占位 + 光标。inputW 含前导空格。
+  const { avail, caretX, at, endX, startX } = inputView(text, cursor, width);
   let inputNode: React.ReactNode;
   let inputW: number;
   if (text) {
-    const c = Math.max(0, Math.min(cursor, text.length));
-    const before = text.slice(0, c);
-    const at = text.slice(c, c + 1);
-    if (at) {
-      inputNode = (
-        <>
-          {" "}
-          {before}
-          {cursorCell(at)}
-          {text.slice(c + 1)}
-        </>
-      );
-      inputW = 1 + dispWidth(text);
-    } else {
-      inputNode = (
-        <>
-          {" "}
-          {before}
-          {cursorCell(" ")}
-        </>
-      );
-      inputW = 1 + dispWidth(text) + 1;
-    }
+    // 只画窗口内的部分：光标块两侧各取可见片段，宽度合计不超过 avail。
+    const before = sliceCols(text, startX, caretX);
+    const after = sliceCols(text, endX, startX + avail);
+    inputNode = (
+      <>
+        {" "}
+        {before}
+        {cursorCell(at)}
+        {after}
+      </>
+    );
+    inputW = 1 + dispWidth(before) + dispWidth(at) + dispWidth(after);
   } else {
+    // 占位文案按剩余列截断，窄屏下才不会折行把面板撑破。
+    const ph = truncWidth(PANEL_PLACEHOLDER, Math.max(0, avail - 1));
     inputNode = (
       <>
         {" "}
         {cursorCell(" ")}
-        <Text color="#9a9a9a">{PANEL_PLACEHOLDER}</Text>
+        <Text color={PANEL_DIM}>{ph}</Text>
       </>
     );
-    inputW = 1 + 1 + dispWidth(PANEL_PLACEHOLDER);
+    inputW = 1 + 1 + dispWidth(ph);
   }
 
-  // 模型行
-  const metaPlain = ` ${spinner} ${model} · ${basename(cwd)}${title ? ` · ${truncate(title, 20)}` : ""}`;
-  const metaUsed = dispWidth(metaPlain);
+  // 模型行：前导空格 + spinner + 空格 之后，把各段按剩余列预算依次裁掉。
+  const metaSegs = fitSegments(
+    [
+      { t: model, color: "white" },
+      { t: ` · ${basename(cwd)}`, color: PANEL_DIM },
+      ...(title ? [{ t: ` · ${truncate(title, 20)}`, color: PANEL_DIM }] : []),
+    ],
+    Math.max(0, width - 4),
+  );
+  const metaUsed = 3 + metaSegs.reduce((w, s) => w + dispWidth(s.t), 0);
 
-  // 每行统一：细竖条(▏, 宽 1) + 内容 + 补白；竖条贯穿整块高度（对齐 opencode）。
-  const bar = <Text color={barColor}>▏</Text>;
+  // 每行统一：竖条(▎, 1/4 块，宽 1 格) + 内容 + 补白；竖条贯穿整块高度（对齐 opencode）。
+  // wrap=truncate 兜底：上面的列宽都算准了才不会真截到字，但即便算漏一格，
+  // 也只是少画一列，而不是折行把面板撑成两行、竖条断掉。
+  const bar = <Text color={barColor}>▎</Text>;
   const rowLine = (content: React.ReactNode, used: number) => (
-    <Text backgroundColor={PANEL_BG}>
+    <Text backgroundColor={PANEL_BG} wrap="truncate">
       {bar}
       {content}
       {pad(width, 1 + used)}
@@ -1432,7 +1594,7 @@ function InputPanel({
   );
 
   return (
-    <Box flexDirection="column" width={width}>
+    <Box flexDirection="column" width={width} ref={panelRef}>
       {rowLine(null, 0)}
       {rowLine(inputNode, inputW)}
       {rowLine(null, 0)}
@@ -1440,9 +1602,11 @@ function InputPanel({
         <>
           {" "}
           <Text color={running ? "yellow" : PANEL_BAR}>{spinner}</Text>{" "}
-          <Text color="white">{model}</Text>
-          <Text color="#9a9a9a"> · {basename(cwd)}</Text>
-          {title ? <Text color="#9a9a9a"> · {truncate(title, 20)}</Text> : null}
+          {metaSegs.map((s) => (
+            <Text key={s.t} color={s.color}>
+              {s.t}
+            </Text>
+          ))}
         </>,
         metaUsed,
       )}

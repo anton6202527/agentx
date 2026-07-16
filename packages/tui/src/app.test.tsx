@@ -22,7 +22,7 @@ import {
   type SessionEvent,
   type SessionHost,
 } from "@anicode/core";
-import { App } from "./app.js";
+import { App, dispWidth, inputView, InputPanel, Welcome } from "./app.js";
 import { messagesToItems, todosFromMessages } from "./transcript.js";
 
 function scriptedProvider(scripts: ChatMessage[][]): Provider {
@@ -713,4 +713,94 @@ test("TUI: ↑/↓ 回溯已提交的输入历史", async () => {
   await tick(20);
   assert.deepEqual(sent, ["alpha"]);
   view.unmount();
+});
+
+/** ink-testing-library 的帧带 ANSI 颜色，比对宽度前先剥掉 SGR。 */
+const SGR = new RegExp("\\u001b\\[[0-9;]*m", "g");
+
+test("TUI: 窄屏 logo 只裁两侧，不压缩也不折行", () => {
+  const rowsAt = (width: number) =>
+    (render(<Welcome width={width} />).lastFrame() ?? "")
+      .replace(SGR, "")
+      .split("\n")
+      .map((l) => l.trimEnd());
+
+  // 渲染宽度（ink-testing-library 固定 100 列）里 logo 被居中，故行首留白不算内容宽度。
+  const contentWidth = (line: string) => line.length - (line.length - line.trimStart().length);
+
+  const wide = rowsAt(120).map((l) => l.trim()); // 宽屏：完整 wordmark
+  assert.equal(wide.length, 5); // 行数即字高，折行会把它撑高
+
+  for (const width of [40, 24, 12]) {
+    const rows = rowsAt(width);
+    assert.equal(rows.length, 5, `width=${width} 折行了`);
+    for (const l of rows) {
+      assert.ok(contentWidth(l) <= width, `width=${width} 行超宽（${contentWidth(l)}）`);
+    }
+    // 可见部分必须是完整 wordmark 的连续片段：字形没被压缩，只是两侧裁掉了
+    rows.forEach((l, i) => {
+      assert.ok(wide[i]!.includes(l.trim()), `width=${width} 第 ${i} 行不是原 wordmark 的子串`);
+    });
+  }
+});
+
+/** 面板每行都以竖条打头；剥掉 SGR 后按行返回，用来断言结构没被折行撑破。 */
+function panelRows(props: { text: string; cursor: number; width: number }): string[] {
+  const frame =
+    render(
+      <InputPanel
+        text={props.text}
+        cursor={props.cursor}
+        width={props.width}
+        model="anthropic/claude-opus-4-8"
+        cwd="/Users/someone/work/a-rather-long-project-name"
+        running={false}
+        spinner="●"
+      />,
+    ).lastFrame() ?? "";
+  return frame.replace(SGR, "").split("\n");
+}
+
+test("TUI: 窄屏输入面板不折行，占位与模型行按宽度截断", () => {
+  for (const width of [60, 30, 20, 12]) {
+    const rows = panelRows({ text: "", cursor: 0, width });
+    assert.equal(rows.length, 5, `width=${width} 面板被撑成 ${rows.length} 行`);
+    for (const [i, l] of rows.entries()) {
+      // 折行时第二行没有竖条，正是它把面板结构撑破的表现
+      assert.ok(l.startsWith("▎"), `width=${width} 第 ${i} 行缺竖条: ${JSON.stringify(l)}`);
+      assert.ok(dispWidth(l) <= width, `width=${width} 第 ${i} 行超宽（${dispWidth(l)}）`);
+    }
+  }
+});
+
+test("TUI: 输入超出面板宽度时窗口跟着光标走，尾部始终可见", () => {
+  const width = 30;
+  const text = `HEAD${"-".repeat(42)}TAIL`; // 50 列，远超面板可用宽度；首尾各留可辨认的记号
+  const rows = panelRows({ text, cursor: text.length, width });
+  assert.equal(rows.length, 5);
+  for (const l of rows) assert.ok(dispWidth(l) <= width, `行超宽（${dispWidth(l)}）`);
+
+  // 光标在末尾：看得见文本尾巴，开头已滚出窗口
+  const line = rows[1]!;
+  assert.ok(line.includes("TAIL"), `尾部不可见: ${JSON.stringify(line)}`);
+  assert.ok(!line.includes("HEAD"), `开头本应被滚出窗口: ${JSON.stringify(line)}`);
+
+  // 光标回到行首：反过来看得见开头、尾巴滚出窗口
+  const atHome = panelRows({ text, cursor: 0, width })[1]!;
+  assert.ok(atHome.includes("HEAD"), `行首不可见: ${JSON.stringify(atHome)}`);
+  assert.ok(!atHome.includes("TAIL"), `尾部本应被滚出窗口: ${JSON.stringify(atHome)}`);
+});
+
+test("TUI: 中文与窄屏下真实光标列都落在窗口内", () => {
+  // 与 App 里停放真实光标用的是同一套 inputView，列偏移必须始终落在面板可见范围内
+  for (const width of [80, 30, 16]) {
+    for (const text of ["", "ab", "你好世界", "你好".repeat(20), "x".repeat(60)]) {
+      for (const cursor of [0, Math.floor(text.length / 2), text.length]) {
+        const { caretX, startX, avail } = inputView(text, cursor, width);
+        const offset = caretX - startX;
+        assert.ok(offset >= 0, `width=${width} 光标滑出窗口左侧: ${offset}`);
+        assert.ok(offset < avail, `width=${width} 光标滑出窗口右侧: ${offset} >= ${avail}`);
+      }
+    }
+  }
 });
