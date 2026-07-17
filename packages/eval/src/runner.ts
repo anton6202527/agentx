@@ -5,12 +5,12 @@
  * 关键点：走的是 core 里真正的 agent loop 与工具链路（不是打桩），所以指标反映的是
  * 实际编辑行为。provider 可注入——真实评测传 createProvider 的结果，离线自测传脚本化 provider。
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, defaultTools, type AgentModelInfo, type Provider } from "@anicode/core";
-import { EDIT_TOOLS, type EvalTask } from "./task.js";
+import { EDIT_TOOLS, verifyFilesOf, type EvalTask } from "./task.js";
 
 export interface RunOptions {
   provider: Provider;
@@ -20,6 +20,42 @@ export interface RunOptions {
   maxTurns?: number;
   /** 每个任务的整体墙钟超时（毫秒），默认 180s。 */
   timeoutMs?: number;
+  /** 给 Agent 开 repo map（system 注入代码地图）——用于 A/B 对比 scaffolding 效果。 */
+  repomap?: boolean;
+}
+
+const binCache = new Map<string, boolean>();
+
+/** 返回任务 requires 里在 PATH 上找不到的可执行文件（空数组 = 依赖齐全）。 */
+export function missingRequirements(task: EvalTask): string[] {
+  return (task.requires ?? []).filter((bin) => {
+    let ok = binCache.get(bin);
+    if (ok === undefined) {
+      const probe = process.platform === "win32" ? "where" : "which";
+      ok = spawnSync(probe, [bin], { stdio: "ignore" }).status === 0;
+      binCache.set(bin, ok);
+    }
+    return !ok;
+  });
+}
+
+/** 生成一条「因缺工具链而跳过」的结果记录。 */
+export function skippedResult(task: EvalTask, missing: string[]): TaskResult {
+  return {
+    id: task.id,
+    title: task.title,
+    passed: false,
+    skipped: true,
+    turns: 0,
+    toolCalls: 0,
+    editCalls: 0,
+    editErrors: 0,
+    toolErrors: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    wallMs: 0,
+    error: `缺工具链: ${missing.join(", ")}`,
+  };
 }
 
 export interface TaskResult {
@@ -27,6 +63,8 @@ export interface TaskResult {
   title: string;
   /** 校验命令退出码 0 → 通过。 */
   passed: boolean;
+  /** 因缺工具链等原因未真正运行——不计入通过率分母。 */
+  skipped?: boolean;
   /** 整个 loop 的模型轮数。 */
   turns: number;
   toolCalls: number;
@@ -89,6 +127,7 @@ export async function runTask(task: EvalTask, opts: RunOptions): Promise<TaskRes
       projectMemory: false,
       injectEnv: false,
       maxTurns: opts.maxTurns ?? 30,
+      ...(opts.repomap ? { repoMap: true } : {}),
     });
 
     const drive = (async () => {
@@ -127,6 +166,14 @@ export async function runTask(task: EvalTask, opts: RunOptions): Promise<TaskRes
       if (timer) clearTimeout(timer);
     }
 
+    // 防作弊：跑校验前把校验相关文件从种子恢复（agent 改校验脚本不算通过）。
+    const protectedFiles = verifyFilesOf(task);
+    if (protectedFiles.length > 0) {
+      await writeSeed(
+        dir,
+        Object.fromEntries(protectedFiles.map((f) => [f, task.files[f] ?? ""])),
+      );
+    }
     const verify = await runVerify(dir, task.verify);
     return {
       id: task.id,

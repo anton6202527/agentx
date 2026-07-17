@@ -14,6 +14,7 @@
     "build:vscode": "npm run build --workspace anicode-vscode",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "eval": "npm run eval --workspace @anicode/eval --",
     "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\" --max-warnings 0",
     "lint:fix": "eslint \"packages/*/src/**/*.{ts,tsx}\" --fix",
     "format": "prettier --write \"packages/*/src/**/*.{ts,tsx}\" \"*.{json,mjs}\"",

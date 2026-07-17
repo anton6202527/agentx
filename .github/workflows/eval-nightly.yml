@@ -1,0 +1,49 @@
+name: Eval (nightly)
+
+# 每晚用真实模型跑完整 eval 矩阵，输出 JSON 工件并与提交在库的基线比较；
+# 通过率跌超容忍度（默认 6 个百分点 ≈ 16 任务容 1 个偶发）则失败告警。
+# 仓库没配 ANTHROPIC_API_KEY 时静默跳过——fork/无凭证环境不报红。
+on:
+  schedule:
+    - cron: "0 18 * * *" # 02:00 Asia/Shanghai
+  workflow_dispatch:
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      # ubuntu-latest 自带 python3 与 go；缺了对应任务会被 harness 跳过而非失败。
+
+      - name: Install
+        run: npm ci
+
+      - name: Run eval
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "ANTHROPIC_API_KEY 未配置，跳过 nightly eval"
+            exit 0
+          fi
+          BASELINE_ARGS=""
+          if [ -f packages/eval/baseline.json ]; then
+            BASELINE_ARGS="--baseline packages/eval/baseline.json"
+          fi
+          npm run eval --workspace @anicode/eval -- \
+            --model anthropic/claude-opus-4-8 \
+            --json eval-result.json $BASELINE_ARGS
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-result
+          path: eval-result.json
+          if-no-files-found: ignore
