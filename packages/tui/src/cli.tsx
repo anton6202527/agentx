@@ -26,6 +26,8 @@ import {
   SessionStore,
   LocalSessionHost,
   DaemonClient,
+  HttpSessionHost,
+  HttpDaemonServer,
   loadConfig,
   toMcpServerConfigs,
   toSubagentDefinitions,
@@ -62,6 +64,9 @@ export interface CliArgs {
   cwd: string;
   resume?: string;
   daemon: boolean;
+  /** HTTP host 模式：连一个 `anicode serve` 起的 HTTP+SSE 服务。 */
+  http?: string;
+  httpToken?: string;
   permissionMode: "default" | "acceptEdits" | "auto";
   socket: string;
   sessionsDir: string;
@@ -99,6 +104,8 @@ export function parseArgs(argv: string[]): CliArgs {
   let showModels = false;
   let debugLog: string | undefined;
   let traceContent = false;
+  let http: string | undefined;
+  let httpToken: string | undefined;
   let permissionMode: CliArgs["permissionMode"] = "default";
   const seen = new Set<string>();
 
@@ -146,6 +153,16 @@ export function parseArgs(argv: string[]): CliArgs {
         }
         break;
       }
+      case "--http":
+        mark(arg);
+        http = requiredValue(argv, i, arg);
+        i++;
+        break;
+      case "--http-token":
+        mark(arg);
+        httpToken = requiredValue(argv, i, arg);
+        i++;
+        break;
       case "--demo":
         mark(arg);
         demo = true;
@@ -221,12 +238,19 @@ export function parseArgs(argv: string[]): CliArgs {
     );
   if (demo) model = "debug/demo";
 
+  if (http && daemon)
+    throw new Error(t("--http and --daemon cannot be used together", "--http 与 --daemon 不能同时使用"));
+
   return {
     model,
     modelExplicit: seen.has("--model"),
     cwd,
     ...(resume ? { resume } : {}),
     daemon,
+    ...(http ? { http } : {}),
+    ...(httpToken ?? process.env.ANICODE_HTTP_TOKEN
+      ? { httpToken: httpToken ?? process.env.ANICODE_HTTP_TOKEN! }
+      : {}),
     permissionMode,
     socket,
     sessionsDir,
@@ -276,6 +300,14 @@ export function helpText(): string {
     t(
       `  --daemon [socket]         Connect to shared daemon\n`,
       `  --daemon [socket]         连接共享守护进程\n`,
+    ) +
+    t(
+      `  --http <url>              Connect to an anicode serve HTTP host (see: anicode serve)\n`,
+      `  --http <url>              连接 anicode serve 起的 HTTP 服务（另见: anicode serve）\n`,
+    ) +
+    t(
+      `  --http-token <token>      Bearer token for --http (or ANICODE_HTTP_TOKEN)\n`,
+      `  --http-token <token>      --http 的 Bearer token（或 ANICODE_HTTP_TOKEN）\n`,
     ) +
     t(
       `  --debug-log [file]        Write JSONL debug log (without polluting the terminal)\n`,
@@ -432,6 +464,20 @@ export async function buildHost(
   if (args.daemon) {
     return DaemonClient.connect(args.socket);
   }
+  if (args.http) {
+    return new HttpSessionHost({
+      baseUrl: args.http,
+      ...(args.httpToken ? { token: args.httpToken } : {}),
+    });
+  }
+  return new LocalSessionHost(buildManager(args, extras));
+}
+
+/** 本地 SessionManager 构造：LocalSessionHost 与 `anicode serve` 共用同一套装配。 */
+export function buildManager(
+  args: Pick<CliArgs, "sessionsDir" | "permissionMode">,
+  extras: { config?: AnicodeConfig; extraTools?: Tool[] } = {},
+): SessionManager {
   const config = extras.config ?? {};
   // 配置里的自定义 agents 追加到内置 general 之后（general 兜底通用委派）。
   const configAgents = toSubagentDefinitions(config);
@@ -462,7 +508,61 @@ export async function buildHost(
       : {}),
     smallModel: config.smallModel ?? true, // 摘要等杂活自动走便宜模型
   });
-  return new LocalSessionHost(manager);
+  return manager;
+}
+
+/**
+ * `anicode serve [--port N] [--host H] [--token T] [--sessions DIR]` ——
+ * 起 HTTP+SSE 会话服务（server-first）：任意数量的 CLI/App/Web 客户端可用
+ * `anicode --http http://H:N` 连上来共享/接管会话。默认只绑 127.0.0.1；
+ * 绑非回环地址必须配 --token（或 ANICODE_HTTP_TOKEN）。
+ */
+export async function runServeCommand(
+  argv: string[],
+  io: { output?: NodeJS.WritableStream } = {},
+): Promise<HttpDaemonServer> {
+  const out = io.output ?? process.stderr;
+  let port = 8317;
+  let hostAddr = "127.0.0.1";
+  let token = process.env.ANICODE_HTTP_TOKEN;
+  let sessionsDir = path.join(os.homedir(), ".anicode", "sessions");
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--port") {
+      port = Number(requiredValue(argv, i, arg));
+      i++;
+    } else if (arg === "--host") {
+      hostAddr = requiredValue(argv, i, arg);
+      i++;
+    } else if (arg === "--token") {
+      token = requiredValue(argv, i, arg);
+      i++;
+    } else if (arg === "--sessions") {
+      sessionsDir = path.resolve(requiredValue(argv, i, arg));
+      i++;
+    } else {
+      throw new Error(t(`Unknown serve argument: ${arg}`, `serve 未知参数: ${arg}`));
+    }
+  }
+  if (hostAddr !== "127.0.0.1" && hostAddr !== "localhost" && !token) {
+    throw new Error(
+      t(
+        "Binding a non-loopback host requires --token (or ANICODE_HTTP_TOKEN)",
+        "绑定非回环地址必须配 --token（或 ANICODE_HTTP_TOKEN）",
+      ),
+    );
+  }
+  const { config } = await loadConfig();
+  const manager = buildManager({ sessionsDir, permissionMode: "default" }, { config });
+  const server = new HttpDaemonServer({ manager, ...(token ? { token } : {}) });
+  await server.listen(port, hostAddr);
+  out.write(
+    t(
+      `anicode serve listening on http://${hostAddr}:${server.port()} (sessions: ${sessionsDir})\n`,
+      `anicode serve 已监听 http://${hostAddr}:${server.port()}（会话目录: ${sessionsDir}）\n`,
+    ),
+  );
+  return server;
 }
 
 /** --resume 只选定会话；真正的 open/订阅由 App 统一执行一次。 */
@@ -598,9 +698,18 @@ function tryOpenBrowser(url: string): void {
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
-  // auth 子命令在 parseArgs 之前拦截（订阅登录/登出/查看，不进会话流程）。
+  // auth/serve 子命令在 parseArgs 之前拦截（不进会话流程）。
   if (argv[0] === "auth") {
     await runAuthCommand(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "serve") {
+    await runServeCommand(argv.slice(1));
+    // 前台常驻直到 SIGINT/SIGTERM。
+    await new Promise<void>((resolve) => {
+      process.once("SIGINT", resolve);
+      process.once("SIGTERM", resolve);
+    });
     return;
   }
 
