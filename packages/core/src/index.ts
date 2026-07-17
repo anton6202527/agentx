@@ -117,8 +117,22 @@ export {
   type ConfigAgent,
   type LoadedConfig,
 } from "./config.js";
-export { LspClient, LspPool, pickLspServer, type LspServerConfig, type Diagnostic } from "./lsp.js";
+export {
+  LspClient,
+  LspPool,
+  pickLspServer,
+  type LspServerConfig,
+  type Diagnostic,
+  type LspLocation,
+  type LspSymbol,
+} from "./lsp.js";
 export { createDiagnosticsTool } from "./tools/diagnostics.js";
+export {
+  createLspNavTools,
+  createDefinitionTool,
+  createReferencesTool,
+  createSymbolsTool,
+} from "./tools/lsp-nav.js";
 export { loadCommands, expandCommand, type CustomCommand } from "./commands.js";
 export {
   loadProjectMemory,
@@ -158,6 +172,16 @@ export {
   bashTool,
   webFetchTool,
   htmlToText,
+  createWebSearchTool,
+  formatSearchResults,
+  tavilyBackend,
+  braveBackend,
+  parseTavilyResponse,
+  parseBraveResponse,
+  webSearchBackendFromEnv,
+  type WebSearchBackend,
+  type WebSearchResult,
+  type WebSearchQuery,
   splitShellCommand,
   analyzeShellCommand,
   type ShellCommandAnalysis,

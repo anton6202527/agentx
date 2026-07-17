@@ -5,12 +5,27 @@
  * 元数据让权限引擎无需硬编码工具名即可决策。
  */
 
-import type { ToolDefinition, Usage } from "../types.js";
+import type { ImagePart, ToolDefinition, Usage } from "../types.js";
 
 export interface ToolContext {
   /** 工作目录（所有相对路径的根，也是沙箱边界） */
   cwd: string;
   signal: AbortSignal;
+  /**
+   * 当前模型是否支持视觉。工具据此决定「附图」还是「只回一句文本说明」——
+   * 给不支持视觉的模型塞 image 块会被 provider 直接拒绝。
+   * 未知能力时按 false 处理（保守：宁可降级为文本，也不要整轮请求失败）。
+   */
+  modelSupportsImages?: boolean;
+  /**
+   * 给本次工具结果附带图片（如 read 一张截图/设计稿）。与 emit / addUsage 同属
+   * 「工具向父 Agent 回传附加数据」的回调，因此 run() 的返回值仍是纯文本 —— 既有工具无需改动。
+   *
+   * Agent 会把图片排在本轮全部 tool_result 之后送进同一条 user 消息：
+   * 两个 provider 的映射层本就支持独立 image 块（Anthropic image / OpenAI image_url），
+   * 故无需改 provider。调用前应先检查 modelSupportsImages。
+   */
+  attachImage?: (image: ImagePart) => void;
   /** OS 级命令沙箱策略（bash 工具据此包一层 sandbox-exec）；缺省 none / 读环境变量。 */
   sandbox?: "none" | "read-only" | "workspace-write";
   /**
@@ -54,7 +69,10 @@ export interface Tool {
    * 为另一个 Agent 创建独立工具实例。有闭包状态的工具必须实现；无状态工具可省略。
    */
   fork?(): Tool;
-  /** 执行，返回给模型的文本结果。抛异常 = 工具错误（上层包成 is_error 回传） */
+  /**
+   * 执行，返回给模型的文本结果。抛异常 = 工具错误（上层包成 is_error 回传）。
+   * 需要附带图片时用 ctx.attachImage，不改变本返回值契约。
+   */
   run(input: Record<string, unknown>, ctx: ToolContext): Promise<string>;
 }
 

@@ -63,8 +63,8 @@ export const readTool: Tool = {
   def: {
     name: "read",
     description: t(
-      "Read a file's contents, returning text with line numbers. Optionally use offset/limit to read a large file in chunks.",
-      "读取文件内容，返回带行号的文本。可选 offset/limit 分段读取大文件。",
+      "Read a file's contents, returning text with line numbers. Optionally use offset/limit to read a large file in chunks. Also reads images (png/jpg/gif/webp) — when the model supports vision, the image itself is attached, so you can inspect screenshots, mockups, and diagrams directly.",
+      "读取文件内容，返回带行号的文本。可选 offset/limit 分段读取大文件。也可读取图片（png/jpg/gif/webp）——模型支持视觉时会直接附上图片本体，可用于查看截图、设计稿与图表。",
     ),
     parameters: {
       type: "object",
@@ -99,6 +99,9 @@ export const readTool: Tool = {
     } catch (e: any) {
       throw new ToolError(`读取失败: ${e?.code ?? e?.message ?? e}`);
     }
+    // 图片必须先于二进制判定：图片天然含 NUL，否则会被当成"二进制"拒读。
+    const mediaType = imageMediaType(abs);
+    if (mediaType) return readImage(buf, mediaType, rel(ctx.cwd, abs), ctx);
     // 二进制识别：NUL 字节几乎必是二进制；返回提示而非乱码撑爆上下文。
     if (isBinary(buf)) {
       return `(文件 ${rel(ctx.cwd, abs)} 看起来是二进制/非文本，${buf.length} 字节，未按文本读取)`;
@@ -113,6 +116,84 @@ export const readTool: Tool = {
     return slice.map((l, i) => `${String(offset + i).padStart(width)}\t${clampLine(l)}`).join("\n");
   },
 };
+
+/** 各 provider 普遍支持的图片类型（Anthropic / OpenAI 交集）。 */
+const IMAGE_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+};
+
+/**
+ * 单图原始字节上限。provider 侧普遍限制约 5MB base64，而 base64 膨胀约 4/3，
+ * 故原始上限取 ~3.7MB —— 超限宁可回一句说明，也不要整轮请求被拒。
+ */
+const MAX_IMAGE_BYTES = 3_700_000;
+
+function imageMediaType(abs: string): string | undefined {
+  return IMAGE_TYPES[path.extname(abs).toLowerCase()];
+}
+
+/**
+ * 用魔数校验内容确实是该类型的图片。后缀是用户/仓库可控的数据，不能当事实：
+ * 把一个文本文件命名成 .png 后 base64 发出去，provider 会拒掉**整轮请求**
+ * （而不只是这一次工具调用），重试还会重放同样的坏历史 —— 会话就卡死了。
+ */
+function matchesImageMagic(buf: Buffer, mediaType: string): boolean {
+  const startsWith = (...bytes: number[]): boolean =>
+    buf.length >= bytes.length && bytes.every((b, i) => buf[i] === b);
+  switch (mediaType) {
+    case "image/png":
+      return startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+    case "image/jpeg":
+      return startsWith(0xff, 0xd8, 0xff);
+    case "image/gif":
+      return buf.subarray(0, 6).toString("latin1") === "GIF87a" ||
+        buf.subarray(0, 6).toString("latin1") === "GIF89a";
+    case "image/webp":
+      // RIFF....WEBP
+      return (
+        buf.length >= 12 &&
+        buf.subarray(0, 4).toString("latin1") === "RIFF" &&
+        buf.subarray(8, 12).toString("latin1") === "WEBP"
+      );
+    default:
+      return false;
+  }
+}
+
+/**
+ * 读图：模型支持视觉时把图片本体附给模型（经 ctx.attachImage），
+ * 否则如实回一句文本说明 —— 让模型知道"这是张图但我看不到"，而不是收到乱码或静默失败。
+ */
+function readImage(buf: Buffer, mediaType: string, relPath: string, ctx: ToolContext): string {
+  const kb = Math.round(buf.length / 1024);
+  if (!matchesImageMagic(buf, mediaType)) {
+    return t(
+      `(${relPath} has an image extension but its content is not a valid ${mediaType}; not loaded as an image. Check the file — the extension may be wrong.)`,
+      `(${relPath} 的后缀是图片，但内容不是合法的 ${mediaType}，未按图片加载。请确认该文件——后缀可能不对。)`,
+    );
+  }
+  if (!ctx.modelSupportsImages || !ctx.attachImage) {
+    return t(
+      `(${relPath} is an image (${mediaType}, ${kb} KB), but the current model has no vision support, so its content was not loaded.)`,
+      `(${relPath} 是图片（${mediaType}，${kb} KB），但当前模型不支持视觉，未加载图片内容。)`,
+    );
+  }
+  if (buf.length > MAX_IMAGE_BYTES) {
+    return t(
+      `(${relPath} is an image (${mediaType}) but is too large at ${kb} KB (limit ${Math.round(MAX_IMAGE_BYTES / 1024)} KB); content not loaded. Shrink or crop it first.)`,
+      `(${relPath} 是图片（${mediaType}），但 ${kb} KB 超过 ${Math.round(MAX_IMAGE_BYTES / 1024)} KB 上限，未加载内容。可先压缩或裁剪。)`,
+    );
+  }
+  ctx.attachImage({ type: "image", mediaType, data: buf.toString("base64") });
+  return t(
+    `(Read image ${relPath} — ${mediaType}, ${kb} KB. The image itself is attached below.)`,
+    `(已读取图片 ${relPath} —— ${mediaType}，${kb} KB。图片本体已附在下方。)`,
+  );
+}
 
 const MAX_LINE_CHARS = 2000;
 

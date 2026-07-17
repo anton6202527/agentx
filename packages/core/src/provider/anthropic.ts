@@ -2,10 +2,12 @@
  * Anthropic provider —— 统一模型 ↔ Anthropic Messages API 的双向映射。
  *
  * 缓存策略（多轮 agent 的成本生死线）：
- *   断点 1：system 块 —— tools 渲染在 system 之前，此断点把 tools+system 一起缓存
- *   断点 2：最后一条消息的最后一个可缓存块 —— 缓存整个对话前缀，
+ *   断点 1：tools 块（打在最后一个工具上）—— 独立锚定最稳定的大块前缀，
+ *           即使某次请求有 tools 却无 system 也不至于零缓存
+ *   断点 2：system 块 —— 缓存 tools+system 前缀
+ *   断点 3：最后一条消息的最后一个可缓存块 —— 缓存整个对话前缀，
  *           下一轮只有新增消息按全价计费，其余走 cache read（~0.1x）
- *   （上限 4 个断点，留 2 个余量给未来的分层策略）
+ *   （上限 4 个断点，留 1 个余量给未来的分层策略）
  *
  * 其他要点：
  * - 默认 adaptive thinking；effort 映射到 output_config.effort
@@ -169,13 +171,23 @@ export function buildAnthropicRequest(
     : [];
   const system = [...identityBlock, ...userSystem];
 
+  // 工具块独立打一个缓存断点（打在最后一个工具上，缓存整个 tools 前缀）。
+  // 原先缓存 tools 完全依赖「system 存在且带断点」——tools 在线格里排在 system 之前，
+  // 顺带被 system 断点覆盖。但一旦某次请求有 tools 却无 system（少见但合法），
+  // 就一个断点都没有、tools 全额重算。工具定义是最稳定的大块前缀，值得独立锚定。
+  const tools = req.tools?.length ? req.tools.map(toAnthropicTool) : undefined;
+  if (tools && tools.length > 0) {
+    (tools[tools.length - 1] as { cache_control?: Anthropic.CacheControlEphemeral }).cache_control =
+      { type: "ephemeral" };
+  }
+
   return {
     model: req.model,
     max_tokens: req.maxTokens ?? 32000,
     ...(options.adaptiveThinking ? { thinking: { type: "adaptive" as const } } : {}),
     ...(options.adaptiveThinking && req.effort ? { output_config: { effort: req.effort } } : {}),
     ...(system.length ? { system } : {}),
-    ...(req.tools?.length ? { tools: req.tools.map(toAnthropicTool) } : {}),
+    ...(tools ? { tools } : {}),
     messages,
   };
 }

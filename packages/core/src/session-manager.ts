@@ -21,6 +21,8 @@ import type { ToolRegistry } from "./tools/tool.js";
 import type { HookRegistration } from "./hooks.js";
 import type { SubagentDefinition } from "./subagent.js";
 import type { CompactionConfig } from "./context.js";
+import type { WebSearchBackend } from "./tools/web-search.js";
+import { LspPool, type LspServerConfig } from "./lsp.js";
 import { SessionStore, newSessionId, type SessionMeta } from "./session.js";
 import { defaultSmallModel } from "./provider/registry.js";
 import type {
@@ -91,6 +93,16 @@ export interface SessionManagerOptions {
   checkpoints?: boolean;
   /** 会话开始时注入 repo map（代码骨架）帮助模型定位。默认关。 */
   repoMap?: AgentOptions["repoMap"];
+  /**
+   * 启用 web_search 工具（可插拔）。传入一个 WebSearchBackend（tavilyBackend/braveBackend/
+   * 自定义，或 webSearchBackendFromEnv() 的返回值）。省略则不启用。
+   */
+  webSearch?: WebSearchBackend;
+  /**
+   * 启用 diagnostics 工具：给出语言服务器配置，SessionManager 会为每个会话按其 cwd 惰性
+   * 建一个 LspPool 并在 dispose 时统一关闭。空数组/省略则不启用。
+   */
+  lsp?: LspServerConfig[];
   /** 生成会话 id 的时钟/随机源（测试可注入） */
   now?: () => number;
   rand?: () => number;
@@ -339,6 +351,8 @@ export class SessionManager {
   /** 冷会话并发 open/send 时共享同一次磁盘加载，避免订阅到被覆盖的孤儿实例。 */
   private loading = new Map<string, Promise<ManagedSession>>();
   private opts: SessionManagerOptions;
+  /** 每会话按 cwd 建的 LSP 池；进程销毁时统一关闭，避免遗留语言服务器进程。 */
+  private lspPools = new Set<LspPool>();
 
   constructor(opts: SessionManagerOptions) {
     this.opts = opts;
@@ -473,6 +487,15 @@ export class SessionManager {
   /** 进程内宿主销毁时停止所有 live drive；daemon 断开客户端不会调用此方法。 */
   dispose(): void {
     for (const session of this.sessions.values()) session.interrupt();
+    for (const pool of this.lspPools) pool.closeAll();
+    this.lspPools.clear();
+  }
+
+  /** 为某会话 cwd 建一个 LSP 池并登记，供 dispose 统一关闭。 */
+  private lspPoolFor(cwd: string): LspPool {
+    const pool = new LspPool(cwd, this.opts.lsp ?? []);
+    this.lspPools.add(pool);
+    return pool;
   }
 
   // ---------- 内部 ----------
@@ -517,6 +540,8 @@ export class SessionManager {
           ...(this.opts.sandbox ? { sandbox: this.opts.sandbox } : {}),
           ...(this.opts.checkpoints ? { checkpoints: true } : {}),
           ...(this.opts.repoMap !== undefined ? { repoMap: this.opts.repoMap } : {}),
+          ...(this.opts.webSearch ? { webSearch: this.opts.webSearch } : {}),
+          ...(this.opts.lsp?.length ? { lsp: this.lspPoolFor(meta.cwd) } : {}),
           cwd: meta.cwd,
           permission: { mode: "default", ...this.opts.permission, confirm },
           ...(this.opts.tools ? { tools: this.opts.tools() } : {}),

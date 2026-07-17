@@ -16,7 +16,7 @@ packages/
 Electron IPC、VSCode webview postMessage 只是同一契约的不同「传输」实现，可互换。transcript / Markdown /
 diff 等前端无关的纯逻辑集中在 `@anicode/shared`，三端共用、单独测试。
 
-当前全仓类型检查通过，离线测试 **core 211 + eval 4 + shared 6 + TUI 50 + app 16 + vscode 8，共 295 个**。测试不需要真实 API key。
+当前全仓类型检查通过，离线测试 **core 241 + eval 4 + shared 6 + TUI 50 + app 16 + vscode 8，共 325 个**。测试不需要真实 API key。
 
 ## 先本地调试 TUI
 
@@ -229,7 +229,9 @@ registerOpenAICompatibleProvider({
 - **环境接地**：会话开始时快照 `<env>`（cwd/平台/系统/日期/是否 git 仓库/当前分支）+ `<git-status>`（工作区改动与最近提交）注入 system，缓存友好，让模型不再盲飞。见 `env.ts`。
 - 模型能力驱动请求：按 profile 控制 tools、reasoning、输出上限和 compaction 阈值；未知兼容模型不会被强塞 16k 输出参数。
 - 子 agent 的 `provider/model` override 会重新解析 provider，不再错误复用父 provider。
-- 默认工具：`read / write / edit / apply_patch / glob / grep / bash / webfetch / todo_write / task / skill`；配置 LSP 后追加 `diagnostics`。
+- 默认工具：`read / write / edit / apply_patch / glob / grep / bash / bash_output / kill_shell / webfetch / todo_write / task / skill`；配置 LSP 后追加 `diagnostics`。
+- **后台长时命令**：`bash(run_in_background)` 立即返回 shell id 不阻塞，`bash_output` 增量读取新输出（可选正则 filter），`kill_shell` 停止 —— dev server / watch 构建 / 日志跟随不再被 120s 超时打死。增量读取（读过即清）、有界缓冲、自动回收、宿主退出收尸，且**不主动往上下文塞提醒**，规避 Claude Code 后台任务刷爆上下文的已知坑。后台与前台共用同一套 OS 沙箱，绝非绕过通道。见 `tools/shells.ts`。
+- **多模态 read**：`read` 可读图片（png/jpg/gif/webp），模型支持视觉时经 `ctx.attachImage` 把图片本体附在本轮 tool_result 之后送入同一条 user 消息；不支持视觉/超 3.7MB 时如实降级为文本说明。两端 provider 映射（Anthropic `image` 块 / OpenAI `image_url`）已实测通过，无需改 provider。见 `tools/fs.ts`、`tools/tool.ts` 的 `ToolContext.attachImage`。
 - **repo map**：会话开始时按 token 预算注入关键文件与顶层符号签名，基于跨文件引用词频排序，减少首次定位时的盲目检索。
 - **结构化补丁**：`apply_patch` 支持一次增/改/删多个文件，带精确定位、空白容差与最接近片段错误提示。
 - **ripgrep 后端检索**：检测到 `rg` 时 grep/glob 走 ripgrep（尊重 .gitignore、跳过二进制、按 mtime 排序），无 rg 自动回退纯 JS。grep 支持 `output_mode`（content/files_with_matches/count）、`ignore_case`、`context` 前后行、`path`/`glob` 限定。
@@ -292,7 +294,7 @@ npm run build:app
 npm run build:vscode
 ```
 
-当前覆盖 295 个离线测试，包括 provider 映射和真实本地 SSE/HTTP header fixture、工具调用、重试（含 `Retry-After` 解析）、权限与 Plan 模式、hooks、skills、并行只读子代理、compaction、repo map、结构化补丁、检查点回滚、macOS/Linux 沙箱、环境接地渲染、ripgrep/JS 双后端检索、私有会话权限、会话竞态、daemon 多客户端与大快照，以及三端 UI 交互。
+当前覆盖 325 个离线测试，包括 provider 映射和真实本地 SSE/HTTP header fixture、工具调用、重试（含 `Retry-After` 解析）、权限与 Plan 模式、hooks、skills、并行只读子代理、compaction、repo map、结构化补丁、检查点回滚、macOS/Linux 沙箱、环境接地渲染、ripgrep/JS 双后端检索、后台 shell 生命周期（增量读取/容量淘汰/filter 计数/收尸）、多模态 read（魔数校验/降级/图片在 tool_result 之后的排序不变量）、私有会话权限、会话竞态、daemon 多客户端与大快照，以及三端 UI 交互。
 
 `@anicode/eval` 还提供带自校验的真实编辑任务，可汇总通过率、轮数、token 与编辑失败率：
 
@@ -308,6 +310,8 @@ npm run eval --workspace @anicode/eval -- --model <provider/model> --json out.js
 - **跨平台 OS 沙箱（Codex/Claude Code）**：bash 可选用 macOS Seatbelt 或 Linux bubblewrap 包裹——只放行「工作区 + 临时目录」写入，可禁网，并把 `.git` 收紧为只读。见 `tools/sandbox.ts`。
 - **工程化系统提示 + 环境接地（Claude Code/Codex）**：把「先探后改、工具路由、并行批处理、最小改动、改完自验证」写进默认系统提示，并在会话开始注入 `<env>` + `<git-status>` 快照。这是把通用模型行为收敛到「优秀 coding agent」的最大杠杆，且缓存友好。见 `agent.ts`、`env.ts`。
 - **ripgrep 检索后端（Claude Code）**：grep/glob 优先走 ripgrep（尊重 .gitignore、跳过二进制、mtime 排序），支持输出模式/上下文行/大小写；无 rg 回退 JS。检索更快、结果更规整。见 `tools/ripgrep.ts`、`tools/fs.ts`。
+- **后台长时命令（Claude Code 的 run_in_background/BashOutput/KillShell）**：dev server / watch 构建 / 日志跟随不再被 120s 超时打死。并**针对性规避该功能的已知坑**：读取严格增量（读过即清，不会同一段日志反复进上下文）、缓冲有界、结束即回收、上限满时淘汰已结束者（不会假装"kill 一下就能腾位"）、filter 略过的行数如实回报（不静默吞掉 dev server 打印的端口号），且**从不主动往历史塞后台提醒**。后台与前台共用同一套沙箱。见 `tools/shells.ts`。
+- **多模态 read（Claude Code）**：`read` 可直接看截图/设计稿/图表。工具经 `ctx.attachImage` 回传图片（沿用既有 emit/addUsage 回调范式，`run()` 仍返回纯文本，既有工具零改动），Agent 把图片排在本轮 tool_result 之后送入同一条 user 消息 —— 两端 provider 的映射本就支持独立 image 块，**实测无需改 provider**。魔数校验防「后缀是图但内容不是」拖垮整轮请求；无视觉能力或超限则如实降级为文本。见 `tools/fs.ts`、`tools/tool.ts`。
 
 ## 安全边界与下一步
 
@@ -315,6 +319,6 @@ npm run eval --workspace @anicode/eval -- --model <provider/model> --json out.js
 
 后续优先级（据架构评审，均为需要动结构的较大项，故单独列出）：
 
-1. **多模态 read**：工具结果目前只回文本；让 `read` 能返回图片内容块（截图/图表），配合已支持 image 的 provider，是多模态 agent 的关键缺口。
-2. **双轴审批**：在现有 OS 沙箱与权限规则上补 sandbox-first / approve-on-failure，并评估 Linux Landlock。
-3. daemon 升级为 HTTP+SSE + OpenAPI 生成 SDK；结构化 headless 输出、延迟工具加载（ToolSearch）。
+1. **双轴审批**：在现有 OS 沙箱与权限规则上补 sandbox-first / approve-on-failure，并评估 Linux Landlock。
+2. daemon 升级为 HTTP+SSE + OpenAPI 生成 SDK；结构化 headless 输出、延迟工具加载（ToolSearch）。
+3. **后台 shell 的前端呈现**：core 已具备后台 shell 能力与 `shells.list()`，可在 TUI/桌面端补一个 `/bashes` 式的运行中任务面板。

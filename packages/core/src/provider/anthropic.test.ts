@@ -18,6 +18,10 @@ test("缓存断点: system 块 + 最后一条消息的最后块", () => {
   ];
   const req = buildAnthropicRequest({ model: "m", system: "sys", messages, tools });
 
+  // tools 断点（打在最后一个工具上）
+  const wireTools = req.tools as any[];
+  assert.deepEqual(wireTools[wireTools.length - 1].cache_control, { type: "ephemeral" });
+
   // system 断点（覆盖 tools+system 前缀）
   const sys = req.system as any[];
   assert.deepEqual(sys[0].cache_control, { type: "ephemeral" });
@@ -27,6 +31,14 @@ test("缓存断点: system 块 + 最后一条消息的最后块", () => {
   assert.equal(wire[0].content[0].cache_control, undefined);
   assert.equal(wire[1].content[0].cache_control, undefined);
   assert.deepEqual(wire[2].content[0].cache_control, { type: "ephemeral" });
+});
+
+test("缓存断点: 有 tools 但无 system 时，tools 仍独立打断点（不至于零缓存）", () => {
+  const messages: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "问" }] }];
+  const req = buildAnthropicRequest({ model: "m", messages, tools });
+  assert.equal(req.system, undefined);
+  const wireTools = req.tools as any[];
+  assert.deepEqual(wireTools[wireTools.length - 1].cache_control, { type: "ephemeral" });
 });
 
 test("OAuth: 身份 system 块置顶且不缓存，用户 system 跟随并打缓存断点", () => {

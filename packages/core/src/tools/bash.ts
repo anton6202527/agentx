@@ -10,21 +10,70 @@
  */
 
 import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
-import {
-  resolveSandboxPolicy,
-  resolveSandboxNetwork,
-  wrapWithSandbox,
-  sandboxBinaryAvailable,
-  type SandboxSpec,
-} from "./sandbox.js";
 import * as path from "node:path";
+import { buildShellSpawn, sanitizedShellEnv } from "./shell-spawn.js";
+import { startBackgroundShell } from "./shells.js";
 import type { Tool, ToolContext } from "./tool.js";
 import { ToolError } from "./tool.js";
 import { t } from "../i18n.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT = 30_000; // 截断超长输出，保护上下文
+
+/**
+ * 头尾双向截断的输出捕获。
+ *
+ * 为什么不是「攒满 MAX_OUTPUT 就丢弃后续」：构建/测试的失败摘要几乎总在**结尾**
+ * （"3 failing"、栈回溯、exit 提示），只留头部等于把最有用的那段丢了。这里保留
+ * 头 80% + 尾 20%（与 Agent 层 truncateToolResult 一致），中段超限才丢。
+ *
+ * 增量拼接期间不做截断（避免每块都 O(n) 重排）；结束时一次性成形。tail 用环形
+ * 缓冲，内存有界，长跑命令也不会把整份输出堆在内存里。
+ */
+class OutputCapture {
+  private head = "";
+  private tail = "";
+  private headFull = false;
+  private overflow = false;
+  private readonly headCap: number;
+  private readonly tailCap: number;
+
+  constructor(private readonly max: number = MAX_OUTPUT) {
+    this.headCap = Math.floor(max * 0.8);
+    this.tailCap = max - this.headCap;
+  }
+
+  push(chunk: string): void {
+    if (!this.headFull) {
+      const room = this.headCap - this.head.length;
+      if (chunk.length <= room) {
+        this.head += chunk;
+        return;
+      }
+      this.head += chunk.slice(0, room);
+      chunk = chunk.slice(room);
+      this.headFull = true;
+    }
+    // 头部已满，其余进尾部环形缓冲：只保留最后 tailCap 个字符。
+    this.tail += chunk;
+    if (this.tail.length > this.tailCap) {
+      this.overflow = true;
+      this.tail = this.tail.slice(this.tail.length - this.tailCap);
+    }
+  }
+
+  /** 成形最终文本；suffix 追加在正文后（如超时/中断说明），不计入截断预算。 */
+  render(suffix = ""): string {
+    let body: string;
+    if (!this.overflow) {
+      body = this.head + this.tail;
+    } else {
+      body = `${this.head}\n…（输出超过 ${this.max} 字符，中段已截断）…\n${this.tail}`;
+    }
+    if (!body) body = "(无输出)";
+    return body + suffix;
+  }
+}
 
 /**
  * 把复合命令按顶层 shell 操作符（&& || ; | & 换行）拆成子命令（尊重引号）。
@@ -277,6 +326,13 @@ export const bashTool: Tool = {
             `超时毫秒数（默认 ${DEFAULT_TIMEOUT_MS}）`,
           ),
         },
+        run_in_background: {
+          type: "boolean",
+          description: t(
+            "Run in the background and return a shell id immediately instead of blocking. Use for dev servers, watch builds, log tailing, and anything long-running or that never exits on its own. Read its output later with bash_output, stop it with kill_shell.",
+            "在后台运行并立即返回 shell id，不阻塞。适合 dev server、watch 构建、日志跟随，以及任何长时间运行或不会自己结束的命令。之后用 bash_output 读输出、kill_shell 停止。",
+          ),
+        },
       },
       required: ["command"],
       additionalProperties: false,
@@ -292,63 +348,46 @@ export const bashTool: Tool = {
     const command = String(input["command"] ?? "");
     if (!command) throw new ToolError("command 不能为空");
     if (ctx.signal.aborted) throw new ToolError("命令被中断");
+
+    // 后台模式：立即返回 shell id，不阻塞、不受 timeout 约束（这正是它存在的意义）。
+    // 沙箱与前台完全一致（共用 buildShellSpawn），权限门也已在此之前走过。
+    if (input["run_in_background"]) {
+      return Promise.resolve(startBackgroundShell(command, ctx));
+    }
+
     const requestedTimeout = Number(input["timeout_ms"] ?? DEFAULT_TIMEOUT_MS);
     const timeout = Number.isFinite(requestedTimeout)
       ? Math.max(1000, requestedTimeout)
       : DEFAULT_TIMEOUT_MS;
 
-    // OS 级沙箱：macOS Seatbelt / Linux bubblewrap。写入限工作区+临时目录，.git/.anicode 只读，
-    // 网络按 resolveSandboxNetwork 决定。缺沙箱二进制（如未装 bwrap）时回退裸跑并告警一次。
-    const policy = resolveSandboxPolicy(ctx.sandbox);
-    // 用真实路径（解 symlink）构 profile：macOS 的 /tmp→/private/tmp、/var→/private/var 等
-    // 前缀会让「字面 subpath」匹配不到内核已规范化的实际访问路径，导致 .git deny 形同虚设。
-    const canonicalCwd = realpathOr(ctx.cwd);
-    const spec: SandboxSpec = {
-      policy,
-      cwd: canonicalCwd,
-      network: resolveSandboxNetwork(),
-      ...(policy === "workspace-write"
-        ? {
-            readOnlySubpaths: [
-              path.join(canonicalCwd, ".git"),
-              path.join(canonicalCwd, ".anicode"),
-            ],
-          }
-        : {}),
-    };
-    const wrapped = wrapWithSandbox(command, spec);
-    let spawnFile = "/bin/bash";
-    let spawnArgs = ["-c", command];
-    if (wrapped) {
-      if (sandboxBinaryAvailable(wrapped.file)) {
-        spawnFile = wrapped.file;
-        spawnArgs = wrapped.args;
-      } else {
-        warnSandboxUnavailable(wrapped.file, policy);
-      }
-    }
+    const { file: spawnFile, args: spawnArgs } = buildShellSpawn(command, ctx.sandbox, ctx.cwd);
 
     return new Promise((resolve, reject) => {
       const child = spawn(spawnFile, spawnArgs, {
         cwd: ctx.cwd,
         env: sanitizedShellEnv(),
       });
-      let out = "";
-      let truncated = false;
-      const onData = (buf: Buffer) => {
-        if (out.length < MAX_OUTPUT) out += buf.toString();
-        else truncated = true;
-      };
+      const capture = new OutputCapture();
+      const onData = (buf: Buffer) => capture.push(buf.toString());
       child.stdout.on("data", onData);
       child.stderr.on("data", onData);
 
+      // 超时不是「无结果」：命令挂住前往往已经打印了关键线索（哪个测试卡住、
+      // 连到哪个地址）。把已捕获的输出如实回给模型，比只丢一句「超时」有用得多。
       const timer = setTimeout(() => {
         child.kill("SIGKILL");
-        reject(new ToolError(`命令超时（${timeout}ms）被终止`));
+        resolve(
+          `[timeout ${timeout}ms]\n${capture.render(t(
+            `\n…（command exceeded ${timeout}ms and was killed; output above is what it printed before that）`,
+            `\n…（命令超过 ${timeout}ms 被终止；以上是终止前的输出）`,
+          ))}`,
+        );
       }, timeout);
 
+      // 用户中断与超时不同：这是显式打断，应作为错误上抛，让 loop 结束本轮。
       const onAbort = () => {
         child.kill("SIGKILL");
+        clearTimeout(timer);
         reject(new ToolError("命令被中断"));
       };
       ctx.signal.addEventListener("abort", onAbort, { once: true });
@@ -361,41 +400,11 @@ export const bashTool: Tool = {
       child.on("close", (code) => {
         clearTimeout(timer);
         ctx.signal.removeEventListener("abort", onAbort);
-        let body = out.slice(0, MAX_OUTPUT);
-        if (truncated) body += `\n…（输出超过 ${MAX_OUTPUT} 字符已截断）`;
-        resolve(`[exit ${code ?? "?"}]\n${body || "(无输出)"}`);
+        resolve(`[exit ${code ?? "?"}]\n${capture.render()}`);
       });
     });
   },
 };
 
-/** 解析真实路径；路径不存在等异常时回退原值（沙箱仍能用字面路径工作）。 */
-function realpathOr(p: string): string {
-  try {
-    return realpathSync(p);
-  } catch {
-    return p;
-  }
-}
-
-/** 缺沙箱二进制时的一次性告警（按二进制去重），避免每条命令刷屏。 */
-const sandboxWarned = new Set<string>();
-function warnSandboxUnavailable(bin: string, policy: string): void {
-  if (sandboxWarned.has(bin)) return;
-  sandboxWarned.add(bin);
-  const hint =
-    bin === "bwrap"
-      ? "未检测到 bubblewrap（bwrap），命令将不受沙箱约束。安装后可启用文件系统隔离：apt install bubblewrap / dnf install bubblewrap。"
-      : `未检测到沙箱程序 ${bin}，命令将不受沙箱约束。`;
-  process.stderr.write(`[anicode] 沙箱策略=${policy} 但${hint}\n`);
-}
-
-/** 避免 BASH_ENV / 导出的 shell function 在命令正文前隐式执行。 */
-function sanitizedShellEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key === "BASH_ENV" || key === "ENV" || key.startsWith("BASH_FUNC_")) continue;
-    env[key] = value;
-  }
-  return env;
-}
+// buildShellSpawn / sanitizedShellEnv 见 shell-spawn.ts —— 单独成模块以打破
+// bash ↔ shells 的循环依赖；需要的模块直接从那里导入。

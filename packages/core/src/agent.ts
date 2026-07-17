@@ -14,7 +14,7 @@
  */
 
 import { t } from "./i18n.js";
-import type { ChatMessage, Provider, ToolResultPart, Usage } from "./types.js";
+import type { ChatMessage, ImagePart, Provider, ToolResultPart, Usage } from "./types.js";
 import { emptyUsage, toolCallsOf } from "./types.js";
 import {
   PermissionEngine,
@@ -24,6 +24,10 @@ import {
 } from "./permission.js";
 import { ToolRegistry, ToolError, type Tool } from "./tools/tool.js";
 import { defaultTools } from "./tools/index.js";
+import { createWebSearchTool, type WebSearchBackend } from "./tools/web-search.js";
+import { createDiagnosticsTool } from "./tools/diagnostics.js";
+import { createLspNavTools } from "./tools/lsp-nav.js";
+import type { LspPool } from "./lsp.js";
 import { Chan } from "./chan.js";
 import { HookRunner, type HookRegistration } from "./hooks.js";
 import { createTaskTool, type SubagentDefinition } from "./subagent.js";
@@ -136,6 +140,17 @@ export interface AgentOptions {
   checkpoints?: boolean | SnapshotStore;
   /** OS 级命令沙箱策略（bash 工具用）；默认 none（也可由环境变量 AGENTX_BASH_SANDBOX 覆盖）。 */
   sandbox?: "none" | "read-only" | "workspace-write";
+  /**
+   * 启用 web_search 工具（让模型能发现 URL，而不只是抓已知 URL）。可插拔：传入一个
+   * WebSearchBackend（如 tavilyBackend/braveBackend/自定义）。不传则不注册该工具。
+   */
+  webSearch?: WebSearchBackend;
+  /**
+   * 启用 LSP 工具套件：diagnostics（自查）+ definition/references/symbols（语义导航）。
+   * 传入一个已就绪的 LspPool；生命周期由宿主持有（进程需在会话结束时 closeAll）。
+   * 不传则不注册这些工具。
+   */
+  lsp?: LspPool;
   /** 上下文压缩配置。传入即启用；summarizer 缺省用当前 provider 自摘要 */
   compaction?: Partial<CompactionConfig> | boolean;
   /** 会话持久化 */
@@ -197,6 +212,7 @@ function defaultSystem(): string {
 - Prefer grep / glob / read to search code; don't use bash cat / find / grep / ls — the dedicated tools are faster, cleaner, and can run in parallel.
 - Edit files with edit / write; don't rewrite source via shell redirection (echo >> / sed -i).
 - Reserve bash for build, test, git, package management, and other cases that genuinely need a shell.
+- For anything long-running or that never exits on its own (dev servers, watch builds, tailing logs), use bash with run_in_background instead of blocking until timeout; then read its output with bash_output and stop it with kill_shell when done.
 - Send multiple independent read-only calls (reading a few files, running a few searches) together in one turn so they run in parallel, rather than one at a time.
 
 # Code conventions
@@ -224,6 +240,7 @@ function defaultSystem(): string {
 - 检索代码优先用 grep / glob / read，不要用 bash 的 cat / find / grep / ls —— 专用工具更快、结果更规整、还能并行。
 - 改文件用 edit / write，不要用 shell 重定向（echo >> / sed -i）去改源码。
 - bash 留给构建、测试、git、包管理等真正需要 shell 的场景。
+- 长时间运行或不会自己结束的命令（dev server、watch 构建、日志跟随）用 bash 的 run_in_background，别阻塞到超时；之后用 bash_output 读输出，用完 kill_shell 停掉。
 - 多个相互独立的只读调用（读几个文件、跑几处搜索）请在同一轮里一起发出，让它们并行执行，别一个个串着来。
 
 # 代码规范
@@ -266,6 +283,8 @@ export class Agent {
   private readonly maxTokens: number | undefined;
   private readonly effort: AgentOptions["effort"];
   private readonly supportsTools: boolean;
+  /** 模型是否支持视觉；未知能力按 false（宁可降级为文本，也不要整轮请求被拒）。 */
+  private readonly supportsImages: boolean;
   private readonly maxToolResultChars: number;
   private readonly retry: Required<RetryConfig> | null;
   private readonly useProjectMemory: boolean;
@@ -318,6 +337,7 @@ export class Agent {
     this.maxTurns = opts.maxTurns ?? 50;
     this.maxTokens = resolveMaxTokens(opts.maxTokens, opts.modelInfo);
     this.supportsTools = opts.modelInfo?.capabilities.tools ?? true;
+    this.supportsImages = opts.modelInfo?.capabilities.images ?? false;
     this.effort = opts.modelInfo?.capabilities.reasoning === false ? undefined : opts.effort;
     const maxResult = opts.maxToolResultChars ?? 30_000;
     this.maxToolResultChars = Number.isFinite(maxResult) ? Math.max(256, maxResult) : 30_000;
@@ -346,6 +366,14 @@ export class Agent {
       // 这些已在文件里，勿重复写；自愈补上的合成结果会在下次 flush 时落盘
       this.persistedCount = resumed.length;
       this.history = repairHistory(resumed);
+    }
+    // web_search / diagnostics：都是只读工具，在 perm 引擎构建前注册即可自动放行；
+    // 也在 task 工具之前注册，好让子 agent（含只读的 explore）一并继承 —— 调研子 agent
+    // 能搜网、能自查诊断，正是它们该有的能力。
+    if (opts.webSearch) this.tools.register(createWebSearchTool(opts.webSearch));
+    if (opts.lsp) {
+      this.tools.register(createDiagnosticsTool(opts.lsp));
+      for (const navTool of createLspNavTools(opts.lsp)) this.tools.register(navTool);
     }
     // 子 agent 委派：把 task 工具注册进本 agent 的工具集
     if (opts.subagents) {
@@ -557,8 +585,9 @@ export class Agent {
         return;
       }
 
-      const results = yield* this.runTools(calls, signal);
-      this.history.push({ role: "user", content: results });
+      const { results, images } = yield* this.runTools(calls, signal);
+      // tool_result 必须在前（Anthropic 的硬性要求），工具附带的图片紧随其后。
+      this.history.push({ role: "user", content: [...results, ...images] });
       await this.flushPersist();
       if (signal.aborted) {
         this.acceptingQueuedInput = false;
@@ -721,12 +750,15 @@ export class Agent {
   private async *runTools(
     calls: ToolCall[],
     signal: AbortSignal,
-  ): AsyncGenerator<AgentEvent, ToolResultPart[]> {
+  ): AsyncGenerator<AgentEvent, { results: ToolResultPart[]; images: ImagePart[] }> {
     const results: ToolResultPart[] = [];
+    // 工具附带的图片单独收集：它们必须排在本轮全部 tool_result 之后
+    // （Anthropic 要求 tool_result 块位于 user 消息开头）。
+    const images: ImagePart[] = [];
     let i = 0;
     while (i < calls.length) {
       if (!this.isParallelSafe(calls[i]!)) {
-        yield* this.runToolSafe(calls[i]!, signal, results);
+        yield* this.runToolSafe(calls[i]!, signal, results, images);
         i++;
         continue;
       }
@@ -735,10 +767,10 @@ export class Agent {
         batch.push(calls[i + batch.length]!);
       }
       i += batch.length;
-      if (batch.length === 1) yield* this.runToolSafe(batch[0]!, signal, results);
-      else yield* this.runToolBatch(batch, signal, results);
+      if (batch.length === 1) yield* this.runToolSafe(batch[0]!, signal, results, images);
+      else yield* this.runToolBatch(batch, signal, results, images);
     }
-    return results;
+    return { results, images };
   }
 
   /**
@@ -764,13 +796,18 @@ export class Agent {
     batch: ToolCall[],
     signal: AbortSignal,
     results: ToolResultPart[],
+    images: ImagePart[],
   ): AsyncGenerator<AgentEvent> {
     const chan = new Chan<AgentEvent>();
     const slots: (ToolResultPart | null)[] = new Array(batch.length).fill(null);
+    // 图片也按调用顺序落位，避免并行完成顺序带来的不确定性。
+    const imageSlots: ImagePart[][] = batch.map(() => []);
     const runs = batch.map(async (call, idx) => {
       const local: ToolResultPart[] = [];
       try {
-        for await (const ev of this.runToolSafe(call, signal, local)) chan.push(ev);
+        for await (const ev of this.runToolSafe(call, signal, local, imageSlots[idx]!)) {
+          chan.push(ev);
+        }
       } catch (err) {
         // runToolSafe 已是兜底；这里再守一层，确保任何未来改动都不会漏配对结果。
         const msg = `工具执行异常: ${errText(err)}`;
@@ -799,6 +836,7 @@ export class Agent {
     void Promise.allSettled(runs).then(() => chan.close());
     for await (const ev of chan) yield ev;
     for (const slot of slots) results.push(slot!);
+    for (const slot of imageSlots) images.push(...slot);
   }
 
   /** 无论自定义 ruleKey/权限回调/工具实现怎样抛错，都合成合法的 tool_result。 */
@@ -806,10 +844,11 @@ export class Agent {
     call: ToolCall,
     signal: AbortSignal,
     results: ToolResultPart[],
+    images: ImagePart[],
   ): AsyncGenerator<AgentEvent> {
     const before = results.length;
     try {
-      yield* this.runTool(call, signal, results);
+      yield* this.runTool(call, signal, results, images);
     } catch (err) {
       if (results.length !== before) return;
       const msg = `工具执行异常: ${errText(err)}`;
@@ -823,6 +862,7 @@ export class Agent {
     call: ToolCall,
     signal: AbortSignal,
     results: ToolResultPart[],
+    images: ImagePart[],
   ): AsyncGenerator<AgentEvent> {
     if (signal.aborted) {
       const msg = "会话已中断，工具未执行";
@@ -914,11 +954,15 @@ export class Agent {
     // 执行：进度经 Chan 实时回流（子 agent 事件、长任务心跳）
     const input = decision.updatedInput ?? args;
     const chan = new Chan<AgentEvent>();
+    // 工具经 attachImage 附带的图片先收在本地；只有工具成功时才并入历史。
+    const localImages: ImagePart[] = [];
     const settled = tool
       .run(input, {
         cwd: this.cwd,
         signal,
         ...(this.sandbox ? { sandbox: this.sandbox } : {}),
+        modelSupportsImages: this.supportsImages,
+        attachImage: (img) => localImages.push(img),
         emit: (progress) =>
           chan.push({ type: "tool_progress", id: call.id, name: call.name, event: progress }),
         addUsage: (usage) => this.accumulate(usage),
@@ -958,6 +1002,9 @@ export class Agent {
       ...(isError ? { isError: true } : {}),
     };
     results.push(result);
+    // 图片附在本轮 tool_result 之后进入同一条 user 消息（由 runTools 汇总后排序）。
+    // 工具失败时丢弃：错误结果配一堆图片只会白烧上下文。
+    if (!isError && localImages.length) images.push(...localImages);
     yield { type: "tool_result", id: call.id, name: call.name, content, isError };
   }
 

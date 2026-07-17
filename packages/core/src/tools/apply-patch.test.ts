@@ -127,3 +127,62 @@ test("apply_patch: 工具端到端 增/改/删 + 越界拒绝", async () => {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("apply_patch: 事务性——批中后一个 hunk 定位失败时，前一个文件保持原样（不半应用）", async () => {
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "anicode-patch-")));
+  try {
+    await fs.writeFile(path.join(dir, "first.ts"), "alpha\ntarget\nomega\n");
+    await fs.writeFile(path.join(dir, "second.ts"), "unrelated\n");
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: first.ts", // 这个能定位成功
+      "@@",
+      " alpha",
+      "-target",
+      "+CHANGED",
+      "*** Update File: second.ts", // 这个定位失败
+      "@@",
+      "-nonexistent line",
+      "+z",
+      "*** Add File: third.txt", // 永远不该被创建
+      "+should not exist",
+      "*** End Patch",
+    ].join("\n");
+    await assert.rejects(() => applyPatchTool.run({ patch }, ctx(dir)), /定位失败/);
+    // 关键不变量：整个补丁失败 → 磁盘一字未动。
+    assert.equal(await fs.readFile(path.join(dir, "first.ts"), "utf8"), "alpha\ntarget\nomega\n");
+    assert.equal(await fs.readFile(path.join(dir, "second.ts"), "utf8"), "unrelated\n");
+    assert.equal(
+      await fs.access(path.join(dir, "third.txt")).then(
+        () => true,
+        () => false,
+      ),
+      false,
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("apply_patch: patch 内依赖——先 Add 再 Update 同一文件按序生效", async () => {
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "anicode-patch-")));
+  try {
+    const patch = [
+      "*** Begin Patch",
+      "*** Add File: gen.txt",
+      "+line-a",
+      "+line-b",
+      "*** Update File: gen.txt",
+      "@@",
+      "-line-a",
+      "+line-A",
+      "*** End Patch",
+    ].join("\n");
+    const out = await applyPatchTool.run({ patch }, ctx(dir));
+    assert.match(out, /新增 gen\.txt/);
+    assert.match(out, /修改 gen\.txt/);
+    assert.equal(await fs.readFile(path.join(dir, "gen.txt"), "utf8"), "line-A\nline-b");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

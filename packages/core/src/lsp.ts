@@ -10,7 +10,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 
 export interface LspServerConfig {
   /** 服务器可执行文件，如 "typescript-language-server" */
@@ -36,6 +36,122 @@ const SEVERITY: Record<number, Diagnostic["severity"]> = {
   3: "info",
   4: "hint",
 };
+
+/** 一处代码位置（跳转/引用结果）。line/column 均 1 起，path 为绝对路径。 */
+export interface LspLocation {
+  path: string;
+  line: number;
+  column: number;
+}
+
+/** 一个符号（文档大纲 / 工作区符号搜索结果）。 */
+export interface LspSymbol {
+  name: string;
+  /** LSP SymbolKind 的可读名（function/class/method/…）。 */
+  kind: string;
+  path: string;
+  line: number;
+  column: number;
+  /** 所属容器（类名/命名空间等），若服务器提供。 */
+  container?: string;
+}
+
+/** LSP SymbolKind（1..26）→ 可读名。 */
+const SYMBOL_KIND: Record<number, string> = {
+  1: "file",
+  2: "module",
+  3: "namespace",
+  4: "package",
+  5: "class",
+  6: "method",
+  7: "property",
+  8: "field",
+  9: "constructor",
+  10: "enum",
+  11: "interface",
+  12: "function",
+  13: "variable",
+  14: "constant",
+  15: "string",
+  16: "number",
+  17: "boolean",
+  18: "array",
+  19: "object",
+  20: "key",
+  21: "null",
+  22: "enum-member",
+  23: "struct",
+  24: "event",
+  25: "operator",
+  26: "type-parameter",
+};
+
+function posToLine(range: any): { line: number; column: number } {
+  return {
+    line: (range?.start?.line ?? 0) + 1,
+    column: (range?.start?.character ?? 0) + 1,
+  };
+}
+
+/** textDocument/definition|references 结果（Location | Location[] | LocationLink[]）归一。 */
+function toLocations(res: any): LspLocation[] {
+  if (!res) return [];
+  const arr = Array.isArray(res) ? res : [res];
+  return arr
+    .map((item) => {
+      const uri: string | undefined = item?.uri ?? item?.targetUri;
+      const range = item?.range ?? item?.targetSelectionRange ?? item?.targetRange;
+      if (!uri) return null;
+      const { line, column } = posToLine(range);
+      return { path: safeFsPath(uri), line, column };
+    })
+    .filter((l): l is LspLocation => l !== null && l.path !== "");
+}
+
+/** documentSymbol（层级 DocumentSymbol[]）与 workspace/symbol（扁平 SymbolInformation[]）归一。 */
+function toSymbols(res: any, defaultPath?: string): LspSymbol[] {
+  if (!Array.isArray(res)) return [];
+  const out: LspSymbol[] = [];
+  const walk = (items: any[], container?: string): void => {
+    for (const s of items) {
+      const kind = SYMBOL_KIND[s?.kind] ?? String(s?.kind ?? "");
+      if (s?.location) {
+        // SymbolInformation / WorkspaceSymbol（扁平，带 location）
+        const { line, column } = posToLine(s.location.range);
+        out.push({
+          name: String(s.name ?? ""),
+          kind,
+          path: s.location.uri ? safeFsPath(s.location.uri) : (defaultPath ?? ""),
+          line,
+          column,
+          ...(s.containerName ? { container: String(s.containerName) } : {}),
+        });
+      } else {
+        // DocumentSymbol（层级，带 selectionRange + children）
+        const { line, column } = posToLine(s?.selectionRange ?? s?.range);
+        out.push({
+          name: String(s?.name ?? ""),
+          kind,
+          path: defaultPath ?? "",
+          line,
+          column,
+          ...(container ? { container } : {}),
+        });
+        if (Array.isArray(s?.children) && s.children.length) walk(s.children, String(s?.name ?? ""));
+      }
+    }
+  };
+  walk(res);
+  return out;
+}
+
+function safeFsPath(uri: string): string {
+  try {
+    return fileURLToPath(uri);
+  } catch {
+    return "";
+  }
+}
 
 function guessLanguageId(ext: string): string {
   const map: Record<string, string> = {
@@ -87,7 +203,11 @@ export class LspClient {
         textDocument: {
           publishDiagnostics: { relatedInformation: false },
           synchronization: { didSave: false },
+          definition: { linkSupport: true },
+          references: {},
+          documentSymbol: { hierarchicalDocumentSymbolSupport: true },
         },
+        workspace: { symbol: {} },
       },
     });
     this.notify("initialized", {});
@@ -172,8 +292,8 @@ export class LspClient {
     return this.cfg.extensions.includes(ext.toLowerCase());
   }
 
-  /** 打开文件并等待其诊断（超时返回当前已知/空）。 */
-  async diagnose(absPath: string, timeoutMs = 4000): Promise<Diagnostic[]> {
+  /** 打开（或同步）文件，返回其 uri —— 语言请求前置：服务器需先知道文件内容。 */
+  private async ensureOpen(absPath: string): Promise<string> {
     await this.initialized;
     const uri = pathToFileURL(absPath).href;
     const ext = path.extname(absPath).toLowerCase();
@@ -190,6 +310,44 @@ export class LspClient {
         textDocument: { uri, languageId, version: 1, text },
       });
     }
+    return uri;
+  }
+
+  /** 跳转到定义。position 为 0 起（LSP 原生）。 */
+  async definition(absPath: string, position: { line: number; character: number }): Promise<LspLocation[]> {
+    const uri = await this.ensureOpen(absPath);
+    const res = await this.request("textDocument/definition", { textDocument: { uri }, position });
+    return toLocations(res);
+  }
+
+  /** 查找引用（含声明）。position 为 0 起。 */
+  async references(absPath: string, position: { line: number; character: number }): Promise<LspLocation[]> {
+    const uri = await this.ensureOpen(absPath);
+    const res = await this.request("textDocument/references", {
+      textDocument: { uri },
+      position,
+      context: { includeDeclaration: true },
+    });
+    return toLocations(res);
+  }
+
+  /** 文件大纲（该文件内所有符号）。 */
+  async documentSymbols(absPath: string): Promise<LspSymbol[]> {
+    const uri = await this.ensureOpen(absPath);
+    const res = await this.request("textDocument/documentSymbol", { textDocument: { uri } });
+    return toSymbols(res, absPath);
+  }
+
+  /** 工作区符号搜索（按名字跨文件找定义）。 */
+  async workspaceSymbols(query: string): Promise<LspSymbol[]> {
+    await this.initialized;
+    const res = await this.request("workspace/symbol", { query });
+    return toSymbols(res);
+  }
+
+  /** 打开文件并等待其诊断（超时返回当前已知/空）。 */
+  async diagnose(absPath: string, timeoutMs = 4000): Promise<Diagnostic[]> {
+    const uri = await this.ensureOpen(absPath);
     return new Promise<Diagnostic[]>((resolve) => {
       let timer: ReturnType<typeof setTimeout>;
       const done = (d: Diagnostic[]) => {
@@ -252,6 +410,15 @@ export class LspPool {
     this.clients.push(client);
     this.byExt.set(e, client);
     return client;
+  }
+
+  /** 启动（并返回）每个已配置服务器各一个客户端 —— workspace/symbol 需跨语言查询。 */
+  ensureAllStarted(): LspClient[] {
+    for (const cfg of this.servers) {
+      const ext = cfg.extensions[0];
+      if (ext) this.clientFor(ext);
+    }
+    return this.clients;
   }
 
   closeAll(): void {

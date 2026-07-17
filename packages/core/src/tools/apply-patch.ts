@@ -227,31 +227,64 @@ export const applyPatchTool: Tool = {
     const resolved = await Promise.all(
       ops.map(async (op) => ({ op, abs: await resolveInside(ctx.cwd, op.path) })),
     );
-    const summary: string[] = [];
+
+    // 两阶段：先在内存里把每个 op 算成一个具体的写/删动作，任何 hunk 定位失败、
+    // 目标冲突都在此抛出——此时磁盘一字未动。全部规划成功后才进入提交阶段落盘。
+    // 否则「补丁第 3 个文件的 hunk 找不到」会留下前两个文件已写、后面没写的半应用
+    // 状态，且无回滚——模型面对一个介于新旧之间、自己都说不清的工作区。
+    //
+    // overlay 记录同一补丁内先前 op 的效果（content=最新内容，null=已删），
+    // 使「先 Add 再 Update 同一文件」这类 patch 内依赖仍按顺序生效，而读的是
+    // 规划态而非磁盘态。
+    const overlay = new Map<string, string | null>();
+    const curContent = async (abs: string): Promise<string | null> => {
+      if (overlay.has(abs)) return overlay.get(abs)!;
+      try {
+        return await fs.readFile(abs, "utf8");
+      } catch {
+        return null;
+      }
+    };
+    const curExists = async (abs: string): Promise<boolean> =>
+      overlay.has(abs) ? overlay.get(abs) !== null : await exists(abs);
+
+    type Planned = { abs: string; summary: string } & (
+      | { write: string }
+      | { remove: true }
+    );
+    const planned: Planned[] = [];
     for (const { op, abs } of resolved) {
       if (ctx.signal.aborted) throw new ToolError("会话已中断，补丁未完成");
       if (op.kind === "add") {
-        if (await exists(abs)) throw new ToolError(`Add File 目标已存在: ${op.path}`);
-        await fs.mkdir(path.dirname(abs), { recursive: true });
-        await fs.writeFile(abs, op.lines.join("\n"), "utf8");
-        summary.push(`新增 ${op.path}（${op.lines.length} 行）`);
+        if (await curExists(abs)) throw new ToolError(`Add File 目标已存在: ${op.path}`);
+        const content = op.lines.join("\n");
+        planned.push({ abs, write: content, summary: `新增 ${op.path}（${op.lines.length} 行）` });
+        overlay.set(abs, content);
       } else if (op.kind === "delete") {
-        if (!(await exists(abs))) throw new ToolError(`Delete File 目标不存在: ${op.path}`);
-        await fs.rm(abs, { force: true });
-        summary.push(`删除 ${op.path}`);
+        if (!(await curExists(abs))) throw new ToolError(`Delete File 目标不存在: ${op.path}`);
+        planned.push({ abs, remove: true, summary: `删除 ${op.path}` });
+        overlay.set(abs, null);
       } else {
-        let content: string;
-        try {
-          content = await fs.readFile(abs, "utf8");
-        } catch {
-          throw new ToolError(`Update File 目标不存在或不可读: ${op.path}`);
-        }
-        const updated = applyHunks(content, op.hunks);
-        await fs.writeFile(abs, updated, "utf8");
-        summary.push(`修改 ${op.path}（${op.hunks.length} 处）`);
+        const content = await curContent(abs);
+        if (content === null) throw new ToolError(`Update File 目标不存在或不可读: ${op.path}`);
+        const updated = applyHunks(content, op.hunks); // 定位失败在此抛出，先于任何落盘
+        planned.push({ abs, write: updated, summary: `修改 ${op.path}（${op.hunks.length} 处）` });
+        overlay.set(abs, updated);
       }
     }
-    return `已应用补丁：\n${summary.join("\n")}`;
+
+    // 提交阶段：规划已全部成功，按序落盘。此处的 IO 错误（如权限）仍可能半途，
+    // 但已排除了「模型逻辑错误导致半应用」这一最常见、最难自纠的情形。
+    if (ctx.signal.aborted) throw new ToolError("会话已中断，补丁未提交");
+    for (const p of planned) {
+      if ("remove" in p) {
+        await fs.rm(p.abs, { force: true });
+      } else {
+        await fs.mkdir(path.dirname(p.abs), { recursive: true });
+        await fs.writeFile(p.abs, p.write, "utf8");
+      }
+    }
+    return `已应用补丁：\n${planned.map((p) => p.summary).join("\n")}`;
   },
 };
 

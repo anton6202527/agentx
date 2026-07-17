@@ -182,7 +182,11 @@ export function createTaskTool(opts: TaskToolOptions): Tool {
       //   - 从「继承全部」的默认集里排除 todo_write —— 子 agent 的清单是隔离的、不展示给用户，
       //     只会污染进度流；显式 def.tools 指定了则尊重；
       //   - readOnly 型：进一步收窄到只读工具，保证「无写副作用」这一并行前提成立。
-      const DERIVED_DENY = new Set(["task", "todo_write"]);
+      //   - 从默认集里排除 kill_shell —— 它为了「清理不该二次确认」而标记 readOnly，
+      //     于是会混进 readOnly 型子 agent 的只读工具面，破坏「无写副作用、可并行」的前提：
+      //     一个并行调研子 agent 不该能杀掉主 agent 的 dev server。子 agent 仍可用
+      //     bash_output 读后台输出（那才是真只读）。显式 def.tools 指定了则尊重。
+      const DERIVED_DENY = new Set(["task", "todo_write", "kill_shell"]);
       let base = def.tools ?? opts.tools.names().filter((n) => !DERIVED_DENY.has(n));
       if (def.readOnly) {
         const readOnlySet = new Set(opts.tools.readOnlyNames());
