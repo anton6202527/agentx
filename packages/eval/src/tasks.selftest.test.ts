@@ -23,7 +23,10 @@ async function writeFiles(dir: string, files: Record<string, string>): Promise<v
   }
 }
 
-function runVerify(dir: string, verify: EvalTask["verify"]): Promise<{ code: number; out: string }> {
+function runVerify(
+  dir: string,
+  verify: EvalTask["verify"],
+): Promise<{ code: number; out: string }> {
   return new Promise((resolve) => {
     const child = spawn(verify.cmd, verify.args, { cwd: dir, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";

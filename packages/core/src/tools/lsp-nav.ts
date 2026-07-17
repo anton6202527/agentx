@@ -56,7 +56,9 @@ async function resolvePosition(cwd: string, input: Record<string, unknown>): Pro
   } else if (input["character"] != null) {
     character = Math.max(0, Math.floor(Number(input["character"])));
   } else {
-    throw new ToolError(t("provide symbol or character", "需要提供 symbol 或 character 其一来定位"));
+    throw new ToolError(
+      t("provide symbol or character", "需要提供 symbol 或 character 其一来定位"),
+    );
   }
   return { abs, rel, position: { line: line - 1, character } };
 }
@@ -161,7 +163,10 @@ export function createDefinitionTool(pool: LspPool): Tool {
       const client = clientForPath(pool, abs);
       const locs = await client.definition(abs, position);
       if (locs.length === 0)
-        return t(`(no definition found for the symbol at ${rel}:${position.line + 1})`, `(在 ${rel}:${position.line + 1} 未找到该符号的定义)`);
+        return t(
+          `(no definition found for the symbol at ${rel}:${position.line + 1})`,
+          `(在 ${rel}:${position.line + 1} 未找到该符号的定义)`,
+        );
       return formatLocations(ctx.cwd, locs);
     },
   };
@@ -191,7 +196,10 @@ export function createReferencesTool(pool: LspPool): Tool {
       const client = clientForPath(pool, abs);
       const locs = await client.references(abs, position);
       if (locs.length === 0)
-        return t(`(no references found for the symbol at ${rel}:${position.line + 1})`, `(在 ${rel}:${position.line + 1} 未找到该符号的引用)`);
+        return t(
+          `(no references found for the symbol at ${rel}:${position.line + 1})`,
+          `(在 ${rel}:${position.line + 1} 未找到该符号的引用)`,
+        );
       return formatLocations(ctx.cwd, locs);
     },
   };
@@ -230,7 +238,10 @@ export function createSymbolsTool(pool: LspPool): Tool {
         const client = clientForPath(pool, abs);
         const syms = await client.documentSymbols(abs);
         if (syms.length === 0)
-          return t(`(no symbols in ${path.relative(ctx.cwd, abs) || "."})`, `(${path.relative(ctx.cwd, abs) || "."} 无符号)`);
+          return t(
+            `(no symbols in ${path.relative(ctx.cwd, abs) || "."})`,
+            `(${path.relative(ctx.cwd, abs) || "."} 无符号)`,
+          );
         return formatSymbols(ctx.cwd, syms);
       }
       const query = String(input["query"] ?? "").trim();

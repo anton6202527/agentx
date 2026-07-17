@@ -566,40 +566,37 @@ export class SessionManager {
     resumeMessages: ChatMessage[],
     resolved: ResolvedProvider,
   ): ManagedSession {
-    const session = new ManagedSession(
-      meta,
-      (confirm) => {
-        const agent = new Agent({
-          provider: resolved.provider,
-          model: resolved.model,
-          ...(resolved.modelInfo ? { modelInfo: resolved.modelInfo } : {}),
-          resolveModel: this.opts.resolveProvider,
-          ...(this.smallModelSpec(resolved) ? { smallModel: this.smallModelSpec(resolved)! } : {}),
-          ...(this.opts.sandbox ? { sandbox: this.opts.sandbox } : {}),
-          ...(this.opts.checkpoints ? { checkpoints: true } : {}),
-          ...(this.opts.repoMap !== undefined ? { repoMap: this.opts.repoMap } : {}),
-          ...(this.opts.webSearch ? { webSearch: this.opts.webSearch } : {}),
-          ...(this.opts.lsp?.length ? { lsp: this.lspPoolFor(meta.cwd) } : {}),
-          cwd: meta.cwd,
-          permission: { mode: "default", ...this.opts.permission, confirm },
-          ...(this.opts.permissionProfiles
-            ? { permissionProfiles: this.opts.permissionProfiles }
-            : {}),
-          ...(this.opts.tools ? { tools: this.opts.tools() } : {}),
-          ...(this.opts.hooks ? { hooks: this.opts.hooks } : {}),
-          ...(this.opts.subagents !== undefined ? { subagents: this.opts.subagents } : {}),
-          ...(this.opts.skills !== undefined ? { skills: this.opts.skills } : {}),
-          ...(this.opts.compaction !== undefined ? { compaction: this.opts.compaction } : {}),
-          persistence: {
-            store: this.opts.store,
-            meta,
-            ...(resumeMessages.length ? { resumeMessages } : {}),
-          },
-        });
-        if (this.opts.permissionProfile) agent.setPermissionProfile(this.opts.permissionProfile);
-        return agent;
-      },
-    );
+    const session = new ManagedSession(meta, (confirm) => {
+      const agent = new Agent({
+        provider: resolved.provider,
+        model: resolved.model,
+        ...(resolved.modelInfo ? { modelInfo: resolved.modelInfo } : {}),
+        resolveModel: this.opts.resolveProvider,
+        ...(this.smallModelSpec(resolved) ? { smallModel: this.smallModelSpec(resolved)! } : {}),
+        ...(this.opts.sandbox ? { sandbox: this.opts.sandbox } : {}),
+        ...(this.opts.checkpoints ? { checkpoints: true } : {}),
+        ...(this.opts.repoMap !== undefined ? { repoMap: this.opts.repoMap } : {}),
+        ...(this.opts.webSearch ? { webSearch: this.opts.webSearch } : {}),
+        ...(this.opts.lsp?.length ? { lsp: this.lspPoolFor(meta.cwd) } : {}),
+        cwd: meta.cwd,
+        permission: { mode: "default", ...this.opts.permission, confirm },
+        ...(this.opts.permissionProfiles
+          ? { permissionProfiles: this.opts.permissionProfiles }
+          : {}),
+        ...(this.opts.tools ? { tools: this.opts.tools() } : {}),
+        ...(this.opts.hooks ? { hooks: this.opts.hooks } : {}),
+        ...(this.opts.subagents !== undefined ? { subagents: this.opts.subagents } : {}),
+        ...(this.opts.skills !== undefined ? { skills: this.opts.skills } : {}),
+        ...(this.opts.compaction !== undefined ? { compaction: this.opts.compaction } : {}),
+        persistence: {
+          store: this.opts.store,
+          meta,
+          ...(resumeMessages.length ? { resumeMessages } : {}),
+        },
+      });
+      if (this.opts.permissionProfile) agent.setPermissionProfile(this.opts.permissionProfile);
+      return agent;
+    });
     this.sessions.set(meta.id, session);
     return session;
   }

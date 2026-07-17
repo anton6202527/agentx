@@ -239,7 +239,9 @@ export function parseArgs(argv: string[]): CliArgs {
   if (demo) model = "debug/demo";
 
   if (http && daemon)
-    throw new Error(t("--http and --daemon cannot be used together", "--http 与 --daemon 不能同时使用"));
+    throw new Error(
+      t("--http and --daemon cannot be used together", "--http 与 --daemon 不能同时使用"),
+    );
 
   return {
     model,
@@ -248,7 +250,7 @@ export function parseArgs(argv: string[]): CliArgs {
     ...(resume ? { resume } : {}),
     daemon,
     ...(http ? { http } : {}),
-    ...(httpToken ?? process.env.ANICODE_HTTP_TOKEN
+    ...((httpToken ?? process.env.ANICODE_HTTP_TOKEN)
       ? { httpToken: httpToken ?? process.env.ANICODE_HTTP_TOKEN! }
       : {}),
     permissionMode,
@@ -459,7 +461,7 @@ export function resolveConfiguredProvider(model: string) {
 
 export async function buildHost(
   args: CliArgs,
-  extras: { config?: AnicodeConfig; extraTools?: Tool[] } = {},
+  extras: { config?: AnicodeConfig; extraTools?: Tool[]; deferredTools?: Tool[] } = {},
 ): Promise<SessionHost> {
   if (args.daemon) {
     return DaemonClient.connect(args.socket);
@@ -476,13 +478,14 @@ export async function buildHost(
 /** 本地 SessionManager 构造：LocalSessionHost 与 `anicode serve` 共用同一套装配。 */
 export function buildManager(
   args: Pick<CliArgs, "sessionsDir" | "permissionMode">,
-  extras: { config?: AnicodeConfig; extraTools?: Tool[] } = {},
+  extras: { config?: AnicodeConfig; extraTools?: Tool[]; deferredTools?: Tool[] } = {},
 ): SessionManager {
   const config = extras.config ?? {};
   // 配置里的自定义 agents 追加到内置 general 之后（general 兜底通用委派）。
   const configAgents = toSubagentDefinitions(config);
   const subagents = configAgents.length > 0 ? [GENERAL_SUBAGENT, ...configAgents] : true;
   const extraTools = extras.extraTools ?? [];
+  const deferredTools = extras.deferredTools ?? [];
   const manager = new SessionManager({
     store: new SessionStore(args.sessionsDir),
     resolveProvider: resolveConfiguredProvider,
@@ -497,11 +500,13 @@ export function buildManager(
     repoMap: true, // 会话开始注入代码骨架（repo map），帮模型少盲 grep、首次定位更准
 
     // MCP / diagnostics 等附加工具与内置工具合流；无附加工具时沿用默认工具集。
-    ...(extraTools.length > 0
+    // deferredTools（大量 MCP）延迟暴露：schema 不进请求，模型经 tool_search 按需激活。
+    ...(extraTools.length > 0 || deferredTools.length > 0
       ? {
           tools: () => {
             const reg = defaultTools();
             for (const t of extraTools) reg.register(t);
+            for (const t of deferredTools) reg.register(t, { deferred: true });
             return reg;
           },
         }
@@ -812,14 +817,22 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // 配置了 LSP 服务器则建池，并暴露 diagnostics 工具（惰性按扩展名启动服务器）。
   const lspServers = args.daemon ? [] : toLspServers(config);
   const lspPool = lspServers.length > 0 ? new LspPool(args.cwd, lspServers) : undefined;
-  const extraTools: Tool[] = [...mcpTools, ...(lspPool ? [createDiagnosticsTool(lspPool)] : [])];
+  // MCP 工具超过阈值时转 deferred（延迟暴露）：schema 不占每次请求，
+  // 模型经 tool_search 按需检索激活——对齐 Codex 的 MCP tool search 默认行为。
+  const DEFER_MCP_THRESHOLD = 8;
+  const deferMcp = mcpTools.length > DEFER_MCP_THRESHOLD;
+  const extraTools: Tool[] = [
+    ...(deferMcp ? [] : mcpTools),
+    ...(lspPool ? [createDiagnosticsTool(lspPool)] : []),
+  ];
+  const deferredTools: Tool[] = deferMcp ? mcpTools : [];
 
   // 自定义斜杠命令（.anicode/command/*.md，全局+项目）。
   const commands: CustomCommand[] = args.daemon ? [] : await loadCommands({ cwd: args.cwd });
 
   let host: SessionHost | undefined;
   try {
-    const baseHost = await buildHost(args, { config, extraTools }).catch((err) => {
+    const baseHost = await buildHost(args, { config, extraTools, deferredTools }).catch((err) => {
       throw new Error(
         t(
           `Failed to establish session host: ${(err as Error).message}`,

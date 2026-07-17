@@ -7,11 +7,7 @@ import assert from "node:assert/strict";
 import * as os from "node:os";
 import { Agent } from "./agent.js";
 import type { Provider } from "./types.js";
-import {
-  BUILTIN_PROFILES,
-  PermissionEngine,
-  type PermissionRequest,
-} from "./permission.js";
+import { BUILTIN_PROFILES, PermissionEngine, type PermissionRequest } from "./permission.js";
 
 function req(toolName: string, ruleKey = toolName): PermissionRequest {
   return {

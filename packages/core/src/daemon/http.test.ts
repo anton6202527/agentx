@@ -47,9 +47,9 @@ async function startHttp(dir: string, provider: Provider, token?: string) {
 test("sse 解析：分帧/多 data 行/心跳注释/半帧留存", () => {
   const input =
     ": ping\n\n" +
-    "event: snapshot\ndata: {\"a\":1}\n\n" +
+    'event: snapshot\ndata: {"a":1}\n\n' +
     "event: session\ndata: line1\ndata: line2\n\n" +
-    "event: session\ndata: {\"partial\"";
+    'event: session\ndata: {"partial"';
   const { frames, rest } = parseSseChunk(input);
   assert.equal(frames.length, 2);
   assert.deepEqual(frames[0], { event: "snapshot", data: '{"a":1}' });

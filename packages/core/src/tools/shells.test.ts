@@ -124,10 +124,7 @@ test("bash run_in_background 立即返回 shell id 而不阻塞", async () => {
   const dir = await scratch("anicode-bash-bg-");
   // sleep 30 若是前台会阻塞到超时；后台应立即返回。
   const started = Date.now();
-  const out = await bashTool.run(
-    { command: "sleep 30", run_in_background: true },
-    ctx(dir),
-  );
+  const out = await bashTool.run({ command: "sleep 30", run_in_background: true }, ctx(dir));
   assert.ok(Date.now() - started < 3000, "后台启动不应阻塞");
   const m = /bash_\d+/.exec(out);
   assert.ok(m, `返回内容应含 shell id: ${out}`);
@@ -139,10 +136,7 @@ test("bash run_in_background 立即返回 shell id 而不阻塞", async () => {
 
 test("bash_output 工具读取后台输出并报告状态", async () => {
   const dir = await scratch("anicode-bashoutput-");
-  const out = await bashTool.run(
-    { command: "echo from-tool", run_in_background: true },
-    ctx(dir),
-  );
+  const out = await bashTool.run({ command: "echo from-tool", run_in_background: true }, ctx(dir));
   const id = /bash_\d+/.exec(out)![0];
   let seen = "";
   for (let i = 0; i < 100 && !seen.includes("from-tool"); i++) {
@@ -155,10 +149,7 @@ test("bash_output 工具读取后台输出并报告状态", async () => {
 
 test("bash_output 对未知 id 抛出可自纠的错误", async () => {
   const dir = await scratch("anicode-bashoutput-unknown-");
-  await assert.rejects(
-    () => bashOutputTool.run({ bash_id: "bash_9999" }, ctx(dir)),
-    /bash_9999/,
-  );
+  await assert.rejects(() => bashOutputTool.run({ bash_id: "bash_9999" }, ctx(dir)), /bash_9999/);
 });
 
 test("bash_output filter 只保留匹配行", async () => {

@@ -969,7 +969,11 @@ export function App({
               },
             });
           }
-          return host.send(sessionId, expanded, modelOverride ? { model: modelOverride } : undefined);
+          return host.send(
+            sessionId,
+            expanded,
+            modelOverride ? { model: modelOverride } : undefined,
+          );
         })
         .catch((err) => {
           dispatch({ t: "running", v: false });

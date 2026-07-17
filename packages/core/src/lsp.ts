@@ -137,7 +137,8 @@ function toSymbols(res: any, defaultPath?: string): LspSymbol[] {
           column,
           ...(container ? { container } : {}),
         });
-        if (Array.isArray(s?.children) && s.children.length) walk(s.children, String(s?.name ?? ""));
+        if (Array.isArray(s?.children) && s.children.length)
+          walk(s.children, String(s?.name ?? ""));
       }
     }
   };
@@ -314,14 +315,20 @@ export class LspClient {
   }
 
   /** 跳转到定义。position 为 0 起（LSP 原生）。 */
-  async definition(absPath: string, position: { line: number; character: number }): Promise<LspLocation[]> {
+  async definition(
+    absPath: string,
+    position: { line: number; character: number },
+  ): Promise<LspLocation[]> {
     const uri = await this.ensureOpen(absPath);
     const res = await this.request("textDocument/definition", { textDocument: { uri }, position });
     return toLocations(res);
   }
 
   /** 查找引用（含声明）。position 为 0 起。 */
-  async references(absPath: string, position: { line: number; character: number }): Promise<LspLocation[]> {
+  async references(
+    absPath: string,
+    position: { line: number; character: number },
+  ): Promise<LspLocation[]> {
     const uri = await this.ensureOpen(absPath);
     const res = await this.request("textDocument/references", {
       textDocument: { uri },

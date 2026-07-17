@@ -150,8 +150,10 @@ function matchesImageMagic(buf: Buffer, mediaType: string): boolean {
     case "image/jpeg":
       return startsWith(0xff, 0xd8, 0xff);
     case "image/gif":
-      return buf.subarray(0, 6).toString("latin1") === "GIF87a" ||
-        buf.subarray(0, 6).toString("latin1") === "GIF89a";
+      return (
+        buf.subarray(0, 6).toString("latin1") === "GIF87a" ||
+        buf.subarray(0, 6).toString("latin1") === "GIF89a"
+      );
     case "image/webp":
       // RIFF....WEBP
       return (

@@ -248,10 +248,7 @@ export const applyPatchTool: Tool = {
     const curExists = async (abs: string): Promise<boolean> =>
       overlay.has(abs) ? overlay.get(abs) !== null : await exists(abs);
 
-    type Planned = { abs: string; summary: string } & (
-      | { write: string }
-      | { remove: true }
-    );
+    type Planned = { abs: string; summary: string } & ({ write: string } | { remove: true });
     const planned: Planned[] = [];
     for (const { op, abs } of resolved) {
       if (ctx.signal.aborted) throw new ToolError("会话已中断，补丁未完成");

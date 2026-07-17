@@ -13,9 +13,7 @@ const text = (s: string): ChatMessage[] => [
   { role: "assistant", content: [{ type: "text", text: s }] },
 ];
 
-async function collect(
-  gen: AsyncGenerator<AgentEvent>,
-): Promise<AgentEvent[]> {
+async function collect(gen: AsyncGenerator<AgentEvent>): Promise<AgentEvent[]> {
   const out: AgentEvent[] = [];
   for await (const ev of gen) out.push(ev);
   return out;

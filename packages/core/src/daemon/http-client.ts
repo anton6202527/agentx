@@ -98,7 +98,9 @@ export class HttpSessionHost implements SessionHost {
     const res = await fetch(url, { headers: this.headers(), signal: ac.signal });
     if (!res.ok || !res.body) {
       this.aborts.delete(ac);
-      throw new Error(t(`SSE subscribe failed: HTTP ${res.status}`, `SSE 订阅失败: HTTP ${res.status}`));
+      throw new Error(
+        t(`SSE subscribe failed: HTTP ${res.status}`, `SSE 订阅失败: HTTP ${res.status}`),
+      );
     }
 
     const reader = res.body.getReader();
@@ -132,8 +134,7 @@ export class HttpSessionHost implements SessionHost {
         if (!gotSnapshot)
           snapshotReject(new Error(t("SSE closed before snapshot", "SSE 在 snapshot 前关闭")));
       } catch (err) {
-        if (!gotSnapshot)
-          snapshotReject(err instanceof Error ? err : new Error(String(err)));
+        if (!gotSnapshot) snapshotReject(err instanceof Error ? err : new Error(String(err)));
         // snapshot 之后的流错误：订阅静默终止（对齐 socket 客户端断连语义），
         // 前端可经 close/重开恢复。
       } finally {

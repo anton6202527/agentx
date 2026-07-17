@@ -18,10 +18,7 @@ const ctx = () => ({ cwd: process.cwd(), signal: new AbortController().signal })
 
 test("parseTavilyResponse: results→统一结果，丢弃无 url 项", () => {
   const out = parseTavilyResponse({
-    results: [
-      { title: "A", url: "https://a.test", content: "snippet a" },
-      { title: "no-url" },
-    ],
+    results: [{ title: "A", url: "https://a.test", content: "snippet a" }, { title: "no-url" }],
   });
   assert.deepEqual(out, [{ title: "A", url: "https://a.test", snippet: "snippet a" }]);
 });

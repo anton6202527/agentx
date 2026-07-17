@@ -222,5 +222,8 @@ test("CLI: serve 起 HTTP 服务 → --http host 连上走通完整会话（demo
 });
 
 test("CLI: --http 与 --daemon 互斥", () => {
-  assert.throws(() => parseArgs(["--http", "http://127.0.0.1:1", "--daemon"]), /不能同时使用|together/);
+  assert.throws(
+    () => parseArgs(["--http", "http://127.0.0.1:1", "--daemon"]),
+    /不能同时使用|together/,
+  );
 });

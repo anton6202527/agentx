@@ -377,10 +377,12 @@ export const bashTool: Tool = {
       const timer = setTimeout(() => {
         child.kill("SIGKILL");
         resolve(
-          `[timeout ${timeout}ms]\n${capture.render(t(
-            `\n…（command exceeded ${timeout}ms and was killed; output above is what it printed before that）`,
-            `\n…（命令超过 ${timeout}ms 被终止；以上是终止前的输出）`,
-          ))}`,
+          `[timeout ${timeout}ms]\n${capture.render(
+            t(
+              `\n…（command exceeded ${timeout}ms and was killed; output above is what it printed before that）`,
+              `\n…（命令超过 ${timeout}ms 被终止；以上是终止前的输出）`,
+            ),
+          )}`,
         );
       }, timeout);
 

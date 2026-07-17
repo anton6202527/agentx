@@ -127,6 +127,7 @@ export {
   type LspSymbol,
 } from "./lsp.js";
 export { createDiagnosticsTool } from "./tools/diagnostics.js";
+export { createToolSearchTool } from "./tools/tool-search.js";
 export {
   createLspNavTools,
   createDefinitionTool,

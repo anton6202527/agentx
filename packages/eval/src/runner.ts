@@ -169,10 +169,7 @@ export async function runTask(task: EvalTask, opts: RunOptions): Promise<TaskRes
     // 防作弊：跑校验前把校验相关文件从种子恢复（agent 改校验脚本不算通过）。
     const protectedFiles = verifyFilesOf(task);
     if (protectedFiles.length > 0) {
-      await writeSeed(
-        dir,
-        Object.fromEntries(protectedFiles.map((f) => [f, task.files[f] ?? ""])),
-      );
+      await writeSeed(dir, Object.fromEntries(protectedFiles.map((f) => [f, task.files[f] ?? ""])));
     }
     const verify = await runVerify(dir, task.verify);
     return {

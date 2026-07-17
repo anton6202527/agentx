@@ -39,9 +39,7 @@ export const PY_TASKS: EvalTask[] = [
     requires: ["python3"],
     files: {
       "collect.py":
-        "def append_item(item, bucket=[]):\n" +
-        "    bucket.append(item)\n" +
-        "    return bucket\n",
+        "def append_item(item, bucket=[]):\n" + "    bucket.append(item)\n" + "    return bucket\n",
       "verify.py":
         "from collect import append_item\n" +
         "assert append_item(1) == [1], append_item(1)\n" +

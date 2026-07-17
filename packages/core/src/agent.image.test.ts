@@ -43,7 +43,11 @@ function imageTool(name: string): Tool {
     def: { name, description: "test", parameters: { type: "object", properties: {} } },
     ruleKey: () => name,
     async run(_input, ctx) {
-      ctx.attachImage?.({ type: "image", mediaType: "image/png", data: PNG_1X1.toString("base64") });
+      ctx.attachImage?.({
+        type: "image",
+        mediaType: "image/png",
+        data: PNG_1X1.toString("base64"),
+      });
       return `${name} done`;
     },
   };
@@ -193,8 +197,5 @@ test("Agent: 工具失败时不把图片塞进历史", async () => {
   });
   await drain(agent, "跑一下");
   const content = resultMessage(agent);
-  assert.ok(
-    !content.some((p) => p.type === "image"),
-    "失败的工具结果不应附带图片（白烧上下文）",
-  );
+  assert.ok(!content.some((p) => p.type === "image"), "失败的工具结果不应附带图片（白烧上下文）");
 });

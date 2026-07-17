@@ -78,12 +78,22 @@ export interface Tool {
 
 export class ToolError extends Error {}
 
-/** 把 { name → Tool } 注册进一个可查询的集合 */
+/**
+ * 把 { name → Tool } 注册进一个可查询的集合。
+ *
+ * deferred（延迟暴露）：标记为 deferred 的工具不进 definitions()（即不占请求里的
+ * schema 篇幅），模型通过 tool_search 元工具按需检索并激活。适合大量 MCP 工具场景——
+ * 避免几十个工具 schema 把每次请求撑爆。直接调用未激活的 deferred 工具时会被
+ * 自动激活并执行（宽容语义）。
+ */
 export class ToolRegistry {
   private tools = new Map<string, Tool>();
+  private deferredNames = new Set<string>();
 
-  register(tool: Tool): this {
+  register(tool: Tool, opts?: { deferred?: boolean }): this {
     this.tools.set(tool.def.name, tool);
+    if (opts?.deferred) this.deferredNames.add(tool.def.name);
+    else this.deferredNames.delete(tool.def.name);
     return this;
   }
 
@@ -91,8 +101,29 @@ export class ToolRegistry {
     return this.tools.get(name);
   }
 
+  /** 暴露给模型的 schema（不含未激活的 deferred 工具）。 */
   definitions(): ToolDefinition[] {
-    return [...this.tools.values()].map((t) => t.def);
+    return [...this.tools.values()]
+      .filter((t) => !this.deferredNames.has(t.def.name))
+      .map((t) => t.def);
+  }
+
+  /** 尚未激活的 deferred 工具定义（tool_search 的检索面）。 */
+  deferredDefinitions(): ToolDefinition[] {
+    return [...this.deferredNames].map((n) => this.tools.get(n)!.def);
+  }
+
+  hasDeferred(): boolean {
+    return this.deferredNames.size > 0;
+  }
+
+  isDeferred(name: string): boolean {
+    return this.deferredNames.has(name);
+  }
+
+  /** 激活一个 deferred 工具（下一轮起 schema 进请求）。返回是否确有此延迟工具。 */
+  activate(name: string): boolean {
+    return this.deferredNames.delete(name);
   }
 
   readOnlyNames(): string[] {
@@ -112,12 +143,12 @@ export class ToolRegistry {
     return this.subset(this.names());
   }
 
-  /** 生成指定工具子集；有 fork() 的有状态工具会得到独立实例。 */
+  /** 生成指定工具子集；有 fork() 的有状态工具会得到独立实例。deferred 标记随行。 */
   subset(names: string[]): ToolRegistry {
     const sub = new ToolRegistry();
     for (const name of names) {
       const t = this.tools.get(name);
-      if (t) sub.register(t.fork?.() ?? t);
+      if (t) sub.register(t.fork?.() ?? t, { deferred: this.deferredNames.has(name) });
     }
     return sub;
   }

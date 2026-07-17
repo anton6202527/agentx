@@ -7,11 +7,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-  createDefinitionTool,
-  createReferencesTool,
-  createSymbolsTool,
-} from "./lsp-nav.js";
+import { createDefinitionTool, createReferencesTool, createSymbolsTool } from "./lsp-nav.js";
 import type { LspPool, LspLocation, LspSymbol } from "../lsp.js";
 import { ToolError } from "./tool.js";
 

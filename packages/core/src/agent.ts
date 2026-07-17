@@ -29,6 +29,7 @@ import { defaultTools } from "./tools/index.js";
 import { createWebSearchTool, type WebSearchBackend } from "./tools/web-search.js";
 import { createDiagnosticsTool } from "./tools/diagnostics.js";
 import { createLspNavTools } from "./tools/lsp-nav.js";
+import { createToolSearchTool } from "./tools/tool-search.js";
 import type { LspPool } from "./lsp.js";
 import { Chan } from "./chan.js";
 import { HookRunner, type HookRegistration } from "./hooks.js";
@@ -383,6 +384,9 @@ export class Agent {
       this.tools.register(createDiagnosticsTool(opts.lsp));
       for (const navTool of createLspNavTools(opts.lsp)) this.tools.register(navTool);
     }
+    // 有 deferred 工具（大量 MCP 场景）时自动挂上 tool_search 检索入口；
+    // 只读，在 perm 引擎构建前注册即自动放行。
+    if (this.tools.hasDeferred()) this.tools.register(createToolSearchTool(this.tools));
     // 子 agent 委派：把 task 工具注册进本 agent 的工具集
     if (opts.subagents) {
       // 子 agent 继承工具策略/审计 hooks，避免 task 成为绕过父级写入拦截的通道。
@@ -952,6 +956,8 @@ export class Agent {
       return;
     }
     const tool = this.tools.get(call.name);
+    // 宽容语义：直接调用未激活的 deferred 工具时自动激活（模型可能记得名字径直调用）。
+    if (tool && this.tools.isDeferred(call.name)) this.tools.activate(call.name);
     if (!tool) {
       const msg = `未知工具: ${call.name}`;
       results.push(errResult(call.id, call.name, msg));

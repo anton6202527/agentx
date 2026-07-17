@@ -387,9 +387,7 @@ export const killShellTool: Tool = {
     const id = String(input["shell_id"] ?? "");
     if (!id) throw new ToolError("shell_id 不能为空");
     if (!shells.kill(id)) {
-      throw new ToolError(
-        t(`Unknown shell id: ${id}`, `未知的 shell id: ${id}`),
-      );
+      throw new ToolError(t(`Unknown shell id: ${id}`, `未知的 shell id: ${id}`));
     }
     return t(`Killed background shell ${id}.`, `已终止后台 shell ${id}。`);
   },

@@ -87,7 +87,9 @@ export function createWebSearchTool(backend: WebSearchBackend): Tool {
       try {
         results = await backend(query, { signal: ctx.signal, count });
       } catch (e: any) {
-        throw new ToolError(t(`web_search failed: ${e?.message ?? e}`, `web_search 失败: ${e?.message ?? e}`));
+        throw new ToolError(
+          t(`web_search failed: ${e?.message ?? e}`, `web_search 失败: ${e?.message ?? e}`),
+        );
       }
       return formatSearchResults(query, results.slice(0, count));
     },
