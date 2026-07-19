@@ -195,7 +195,7 @@ const emptyUsage: Usage = {
 };
 
 /** 品牌名（欢迎页 logo 与状态栏）。 */
-export const APP_NAME = "anicode";
+export const APP_NAME = "AniCode Zen";
 
 /** 内置斜杠命令（名字不含前导 `/`），供命令补全菜单展示与运行。描述按当前语言取词。 */
 function builtinCommands(): CommandMenuRow[] {
@@ -1632,7 +1632,10 @@ export function App({
   ) : null;
 
   // 底部状态栏（窄屏下逐段让位，避免折行把整屏布局顶掉）。
-  const brand = `${APP_NAME} v${version}`;
+  const fullBrand = `${APP_NAME} v${version}`;
+  const cwdLabel = tildify(state.meta.cwd);
+  const brand =
+    dispWidth(cwdLabel) + dispWidth(fullBrand) + 1 <= termCols ? fullBrand : APP_NAME;
   // 成本估算跟在 token 后展示（对齐 Claude Code /usage 的美元维度）；无价格信息时省略。
   const costPart =
     state.costUSD !== undefined && state.costUSD > 0 ? ` · $${state.costUSD.toFixed(4)}` : "";
@@ -1745,9 +1748,9 @@ export function App({
 
       <Box flexDirection="column" marginTop={1}>
         <Box justifyContent="space-between">
-          {/* 版本号定宽先占位，路径拿剩下的列；路径从头部截断，保留更有信息量的尾巴 */}
+          {/* 品牌先占位，路径拿剩下的列；空间不足时品牌省略版本，路径仍从头部截断 */}
           <Text dimColor wrap="truncate">
-            {truncWidthStart(tildify(state.meta.cwd), termCols - dispWidth(brand) - 1)}
+            {truncWidthStart(cwdLabel, termCols - dispWidth(brand) - 1)}
           </Text>
           <Text dimColor wrap="truncate">
             {brand}

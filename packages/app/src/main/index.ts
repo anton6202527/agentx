@@ -7,6 +7,7 @@
 
 import * as path from "node:path";
 import { app, BrowserWindow, ipcMain } from "electron";
+import { loadConfig, loadProjectEnv, resolveDefaultModel } from "@anicode/core";
 import { Bridge } from "./bridge.js";
 
 // electron-vite 会注入渲染层入口：dev 下是 devServer URL，prod 下是打包 HTML。
@@ -14,15 +15,19 @@ const RENDERER_DEV_URL = process.env["ELECTRON_RENDERER_URL"];
 
 let bridge: Bridge | undefined;
 
-function createBridge(): Bridge {
+async function createBridge(): Promise<Bridge> {
   const userData = app.getPath("userData");
+  const cwd = process.cwd();
+  await loadProjectEnv({ cwd });
+  const { config } = await loadConfig({ cwd });
   return new Bridge({
-    cwd: process.cwd(),
+    cwd,
     sessionsDir: path.join(userData, "sessions"),
     pluginsFile: path.join(userData, "plugins.json"),
     modelsFile: path.join(userData, "models.json"),
     appName: app.getName(),
     appVersion: app.getVersion(),
+    defaultModel: config.model ?? resolveDefaultModel(),
   });
 }
 
@@ -33,7 +38,7 @@ function createWindow(): void {
     minWidth: 720,
     minHeight: 480,
     show: false,
-    title: "anicode",
+    title: "AniCode Zen",
     backgroundColor: "#1a1a1a",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     webPreferences: {
@@ -54,7 +59,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
-  bridge = createBridge();
+  bridge = await createBridge();
   bridge.register(ipcMain);
   // 连接已启用的 MCP 插件后再建窗；连接失败不阻塞启动（状态在市场里展示）。
   await bridge.init().catch(() => {});

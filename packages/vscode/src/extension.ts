@@ -6,13 +6,16 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { t } from "@anicode/core";
+import { loadConfig, loadProjectEnv, resolveDefaultModel, t } from "@anicode/core";
 import { ChatBridge } from "./bridge.js";
-import { buildManager, modelChoices, DEFAULT_MODEL } from "./host.js";
+import { buildManager, modelChoices } from "./host.js";
 import type { HostToWebview, WebviewToHost } from "./protocol.js";
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd() ?? os.homedir();
+  await loadProjectEnv({ cwd });
+  const { config } = await loadConfig({ cwd });
+  const defaultModel = config.model ?? resolveDefaultModel();
   const sessionsDir = path.join(context.globalStorageUri.fsPath, "sessions");
   const manager = buildManager(sessionsDir);
 
@@ -20,11 +23,11 @@ export function activate(context: vscode.ExtensionContext): void {
   status.command = "anicode.pickModel";
   context.subscriptions.push(status);
 
-  const provider = new ChatViewProvider(context.extensionUri, manager, cwd, () => {
+  const provider = new ChatViewProvider(context.extensionUri, manager, cwd, defaultModel, () => {
     status.text = `$(sparkle) ${provider.model}`;
     status.tooltip = t(
-      `anicode model: ${provider.model} (click to switch)`,
-      `anicode 模型：${provider.model}（点击切换）`,
+      `AniCode Zen model: ${provider.model} (click to switch)`,
+      `AniCode Zen 模型：${provider.model}（点击切换）`,
     );
     status.show();
   });
@@ -54,9 +57,10 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly extensionUri: vscode.Uri,
     private readonly manager: import("@anicode/core").SessionManager,
     private readonly cwd: string,
+    defaultModel: string,
     private readonly onModelChange: () => void,
   ) {
-    this.bridge = new ChatBridge(manager, cwd, DEFAULT_MODEL, () => {});
+    this.bridge = new ChatBridge(manager, cwd, defaultModel, () => {});
     this.onModelChange();
   }
 
@@ -199,7 +203,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="${styleUri}" />
-  <title>anicode</title>
+  <title>AniCode Zen</title>
 </head>
 <body>
   <div id="root"></div>

@@ -7,7 +7,8 @@
     "packages/*"
   ],
   "scripts": {
-    "dev:tui": "tsx packages/tui/src/cli.tsx --demo --cwd . --sessions .anicode-dev/sessions --debug-log .anicode-dev/tui.jsonl",
+    "dev:tui": "tsx packages/tui/src/cli.tsx --cwd . --sessions .anicode-dev/sessions --debug-log .anicode-dev/tui.jsonl",
+    "dev:tui:demo": "tsx packages/tui/src/cli.tsx --demo --cwd . --sessions .anicode-dev/sessions --debug-log .anicode-dev/tui.jsonl",
     "build:cli": "npm run build --workspace anicode",
     "dev:app": "npm run dev --workspace @anicode/app",
     "build:app": "npm run build --workspace @anicode/app",

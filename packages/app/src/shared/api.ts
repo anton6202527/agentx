@@ -46,6 +46,8 @@ export interface AppInfo {
   version: string;
   cwd: string;
   sessionsDir: string;
+  /** 主进程结合项目配置与已就绪凭证选出的新会话默认模型。 */
+  defaultModel: string;
   /** 当前进程能否安全读取 env 里的凭证（本地主进程可以）。 */
   inspectProviderCredentials: boolean;
 }

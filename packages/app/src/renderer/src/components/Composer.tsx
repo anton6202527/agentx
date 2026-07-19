@@ -51,8 +51,8 @@ export function Composer({
           ref={textareaRef}
           className="composer-input"
           placeholder={t(
-            "Message anicode… (Enter to send, Shift+Enter for newline)",
-            "给 anicode 发消息…（Enter 发送，Shift+Enter 换行）",
+            "Message AniCode Zen… (Enter to send, Shift+Enter for newline)",
+            "给 AniCode Zen 发消息…（Enter 发送，Shift+Enter 换行）",
           )}
           value={text}
           disabled={disabled}
@@ -86,8 +86,8 @@ export function Composer({
       </div>
       <div className="composer-hint">
         {t(
-          "anicode can make mistakes; important actions will request permission.",
-          "anicode 可能出错；重要操作会请求授权。",
+          "AniCode Zen can make mistakes; important actions will request permission.",
+          "AniCode Zen 可能出错；重要操作会请求授权。",
         )}
       </div>
     </div>

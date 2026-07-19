@@ -87,6 +87,18 @@ test("registry: 内置模型目录含免费/开源模型且 spec 可直接解析
   // 存在真正免费且开放权重的调试模型（如 OpenRouter :free、Groq 免费档、本地 Ollama）。
   assert.ok(catalog.some((e) => e.free && e.openWeight && e.spec.includes(":free")));
   assert.ok(catalog.some((e) => e.local && e.free && e.openWeight));
+
+  // Google AI 免费层模型应作为可选项出现，并保留视觉与官方 token 上限元数据。
+  const gemini = catalog.filter((e) => e.providerId === "gemini");
+  assert.deepEqual(
+    gemini.map((e) => e.spec),
+    ["gemini/gemini-3.5-flash", "gemini/gemini-3.1-flash-lite", "gemini/gemini-2.5-flash-lite"],
+  );
+  assert.ok(gemini.every((e) => e.free && e.requiresApiKey));
+  const latestGemini = createProvider("gemini/gemini-3.5-flash");
+  assert.equal(latestGemini.modelInfo.capabilities.images, true);
+  assert.equal(latestGemini.modelInfo.limits.contextWindow, 1_048_576);
+  assert.equal(latestGemini.modelInfo.limits.maxOutputTokens, 65_536);
 });
 
 test("registry: defaultSmallModel 为已知 provider 返回可解析的小模型，未知返回 undefined", () => {

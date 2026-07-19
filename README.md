@@ -27,7 +27,9 @@ npm install
 npm run dev:tui
 ```
 
-这个命令使用正式的 `debug/demo` provider，不访问网络、不需要 API key，并把开发数据隔离到：
+启动时会自动读取项目根目录的 `.env.local` / `.env`，并使用 `anicode.json` 或
+`.anicode/anicode.json` 指定的默认模型；若没有可用云端凭证则回退到零网络的 `debug/demo`。
+开发数据隔离到：
 
 ```text
 .anicode-dev/
@@ -42,6 +44,12 @@ npm run dev:tui
 !write      写入 .anicode-debug.txt，并触发权限确认
 !bash       执行无害 printf，并触发权限确认
 !parallel   并行执行 glob + read 两个只读工具
+```
+
+如需强制使用确定性的离线调试模型：
+
+```bash
+npm run dev:tui:demo
 ```
 
 TUI 内可用命令：
@@ -76,7 +84,8 @@ npm exec -- anicode --list-providers
 对话与流式输出、底部输入框（Enter 发送 / Shift+Enter 换行）、可搜索的模型选择器、插件市场与设置页。
 
 架构上主进程内跑 core 的 `SessionManager`，经 `contextBridge`（`window.anicode`）把 `SessionHost`
-暴露给渲染进程——和 daemon 是同构的传输层。开箱即用默认零网络的 `debug/demo` 模型。
+暴露给渲染进程——和 daemon 是同构的传输层。默认模型来自项目配置或已就绪的云端凭证，
+没有可用凭证时回退到零网络的 `debug/demo`。
 
 ```bash
 npm run dev:app      # 开发模式（electron-vite，热更新）
@@ -158,9 +167,9 @@ registry 自带一份可直接选用的模型目录，重点收录**免费额度
 方便零成本调试 agent loop。在 TUI 里输入 `/model`（不带参数）即弹出选择器：可用（本地/免 key/已配置凭证）的排在前面并标 `✔`，缺凭证的标 `✖` 并提示需要设置的环境变量。
 
 - **零网络**：`debug/demo` —— 永远可用，离线流式 echo，支持 `!todo/!write/!bash/!parallel` 驱动真实工具链路。
-- **免费云端额度**：OpenRouter `:free` 变体（DeepSeek R1、Llama 3.3 70B、Qwen2.5 72B、Gemma 2、Mistral 7B）、Groq（Llama 3.3 70B / 3.1 8B、DeepSeek R1 Distill、Gemma 2）、Cerebras（Llama 3.3 70B / 3.1 8B）。
+- **免费云端额度**：Google AI 免费层（Gemini 3.5 Flash、3.1 Flash-Lite、2.5 Flash-Lite）、OpenRouter `:free` 变体（DeepSeek R1、Llama 3.3 70B、Qwen2.5 72B、Gemma 2、Mistral 7B）、Groq（Llama 3.3 70B / 3.1 8B、DeepSeek R1 Distill、Gemma 2）、Cerebras（Llama 3.3 70B / 3.1 8B）。
 - **本地推理**：Ollama（`qwen2.5-coder`、`llama3.2`、`deepseek-r1`，需先 `ollama pull`）。
-- **开放权重直连**：DeepSeek 官方（`deepseek-chat` / `deepseek-reasoner`）。
+- **开放权重直连**：DeepSeek 官方（`deepseek-v4-flash` / `deepseek-v4-pro`，API 按量计费，赠送余额优先抵扣）。
 
 命令行查看完整目录：
 

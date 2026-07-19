@@ -29,6 +29,8 @@ import {
   HttpSessionHost,
   HttpDaemonServer,
   loadConfig,
+  loadProjectEnv,
+  resolveDefaultModel,
   commandHooksFromConfig,
   toMcpServerConfigs,
   toSubagentDefinitions,
@@ -53,9 +55,12 @@ import { App } from "./app.js";
 import { DebugLogger, withDebugLogging } from "./debug-log.js";
 
 const CLI_VERSION = "0.1.2";
+const DISPLAY_NAME = "AniCode Zen";
 // 默认走 DeepSeek 开放模型；真正生效值由 resolveDefaultModel 在运行时按凭证/本地服务挑选
 // （无 DeepSeek key 时优雅回退，见 resolveDefaultModel）。
-const DEFAULT_MODEL = "deepseek/deepseek-chat";
+const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
+
+export { resolveDefaultModel };
 
 interface RawModeInput {
   isTTY?: boolean;
@@ -314,7 +319,7 @@ export function parseArgs(argv: string[]): CliArgs {
 
 export function helpText(): string {
   return (
-    `anicode ${CLI_VERSION}\n\n` +
+    `${DISPLAY_NAME} ${CLI_VERSION}\n\n` +
     t(`Usage: anicode [options]\n\n`, `用法: anicode [选项]\n\n`) +
     t(
       `  --demo                    Use the zero-key deterministic debug model\n`,
@@ -391,7 +396,7 @@ export function helpText(): string {
       `  auth list                 View logged-in credentials\n\n`,
       `  auth list                 查看已登录凭证\n\n`,
     ) +
-    t(`Local zero-config debugging: npm run dev:tui`, `本地零配置调试: npm run dev:tui`)
+    t(`Local zero-config debugging: npm run dev:tui:demo`, `本地零配置调试: npm run dev:tui:demo`)
   );
 }
 
@@ -426,37 +431,6 @@ export function validateArgs(args: CliArgs): void {
         ),
     );
   }
-}
-
-/**
- * 未显式指定模型时的默认：优先挑一个「已配置凭证」的云端 provider，
- * 都没有就回退零网络的 debug/demo —— 于是 `anicode`（无 key、无参数）能像 opencode
- * 一样直接进 TUI，再用 /model 选免费/本地模型或配置密钥。绝不因缺 ANTHROPIC_API_KEY 而退出。
- */
-// 偏好开源 DeepSeek 优先，再退到其它已配置的云端；本地 Ollama 由 detectLocalModel 单独探测。
-const DEFAULT_MODEL_PREFERENCES = [
-  "opencode/big-pickle", // OpenCode Zen 免费（需 OPENCODE_API_KEY）
-  "deepseek/deepseek-chat", // 开源，DeepSeek 官方直连
-  "openrouter/deepseek/deepseek-r1:free", // 开源，OpenRouter 免费额度
-  "groq/deepseek-r1-distill-llama-70b", // 开源，Groq 免费档
-  "openrouter/meta-llama/llama-3.3-70b-instruct:free", // 开源
-  "anthropic/claude-opus-4-8",
-  "openai/gpt-5",
-  "gemini/gemini-2.5-pro",
-  "xai/grok-3",
-];
-
-export function resolveDefaultModel(): string {
-  for (const spec of DEFAULT_MODEL_PREFERENCES) {
-    try {
-      const d = diagnoseProvider(spec);
-      // 只在凭证已就绪时选云端；本地 provider（ollama 等）无法确认在跑，改由 detectLocalModel 探测。
-      if (d.requiresApiKey && d.hasCredentials) return spec;
-    } catch {
-      /* 未知 spec，跳过 */
-    }
-  }
-  return "debug/demo";
 }
 
 /**
@@ -496,8 +470,8 @@ export function assertProviderConfigured(model: string): void {
     throw new Error(
       t(`${diagnostics.warnings.join("；")}.`, `${diagnostics.warnings.join("；")}。`) +
         t(
-          `You can also use --demo (or npm run dev:tui at the repo root) for zero-key debugging.`,
-          `也可以用 --demo（或根目录 npm run dev:tui）进行零 Key 调试。`,
+          `You can also use --demo (or npm run dev:tui:demo at the repo root) for zero-key debugging.`,
+          `也可以用 --demo（或根目录 npm run dev:tui:demo）进行零 Key 调试。`,
         ),
     );
   }
@@ -771,6 +745,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (argv[0] === "serve") {
+    await loadProjectEnv({ cwd: process.cwd() });
     await runServeCommand(argv.slice(1));
     // 前台常驻直到 SIGINT/SIGTERM。
     await new Promise<void>((resolve) => {
@@ -791,6 +766,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     console.log(CLI_VERSION);
     return;
   }
+  await loadProjectEnv({ cwd: args.cwd });
   if (args.listProviders) {
     console.log(
       listProviderDetails()
@@ -830,7 +806,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     ...(args.profile ? { profile: args.profile } : {}),
   });
   for (const w of configWarnings)
-    console.error(t(`anicode config warning: ${w}`, `anicode 配置告警: ${w}`));
+    console.error(t(`${DISPLAY_NAME} config warning: ${w}`, `${DISPLAY_NAME} 配置告警: ${w}`));
 
   // 未显式指定模型时挑默认：配置 model → 本地 Ollama（优先 DeepSeek）→
   // 已配置凭证的云端（DeepSeek 优先）→ 零网络 debug/demo。绝不因缺 ANTHROPIC_API_KEY 报错退出。
@@ -865,15 +841,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         mcpClients = connected.clients;
         console.error(
           t(
-            `anicode: connected ${mcpClients.length} MCP servers, ${mcpTools.length} tools`,
-            `anicode: 已连接 ${mcpClients.length} 个 MCP 服务器，${mcpTools.length} 个工具`,
+            `${DISPLAY_NAME}: connected ${mcpClients.length} MCP servers, ${mcpTools.length} tools`,
+            `${DISPLAY_NAME}: 已连接 ${mcpClients.length} 个 MCP 服务器，${mcpTools.length} 个工具`,
           ),
         );
       } catch (err) {
         console.error(
           t(
-            `anicode: MCP connection failed (skipped): ${(err as Error).message}`,
-            `anicode: MCP 连接失败（已跳过）: ${(err as Error).message}`,
+            `${DISPLAY_NAME}: MCP connection failed (skipped): ${(err as Error).message}`,
+            `${DISPLAY_NAME}: MCP 连接失败（已跳过）: ${(err as Error).message}`,
           ),
         );
       }
@@ -925,8 +901,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     } catch (err) {
       console.error(
         t(
-          `anicode: failed to list prompts from MCP server ${client.name}: ${(err as Error).message}`,
-          `anicode: 拉取 MCP 服务器 ${client.name} 的 prompts 失败: ${(err as Error).message}`,
+          `${DISPLAY_NAME}: failed to list prompts from MCP server ${client.name}: ${(err as Error).message}`,
+          `${DISPLAY_NAME}: 拉取 MCP 服务器 ${client.name} 的 prompts 失败: ${(err as Error).message}`,
         ),
       );
     }
@@ -980,7 +956,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         permissionMode: args.permissionMode,
       });
       host = withDebugLogging(baseHost, logger);
-      console.error(t(`anicode debug log: ${logger.file}`, `anicode 调试日志: ${logger.file}`));
+      console.error(
+        t(`${DISPLAY_NAME} debug log: ${logger.file}`, `${DISPLAY_NAME} 调试日志: ${logger.file}`),
+      );
     }
     // 选定会话：--resume 用已有 ID，否则新建。订阅只由 App 负责。
     const sessionId = await selectSessionId(host, args);

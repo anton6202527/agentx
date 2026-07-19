@@ -321,24 +321,41 @@ const OPENAI_BUILTINS: OpenAICompatibleProviderRegistration[] = [
     maxTokensField: "max_tokens",
     reasoningEffort: false,
     capabilities: cloudDefaults,
-    limits: { contextWindow: 128_000, maxOutputTokens: 8_000 },
+    limits: { contextWindow: 1_000_000, maxOutputTokens: 384_000 },
     models: [
-      { pattern: "deepseek-*", cost: { input: 0.27, output: 1.1, cacheRead: 0.027 } },
-      { pattern: "deepseek-reasoner*", capabilities: { reasoning: true } },
+      {
+        pattern: "deepseek-v4-flash",
+        cost: { input: 0.14, output: 0.28, cacheRead: 0.0028 },
+      },
+      {
+        pattern: "deepseek-v4-pro",
+        cost: { input: 0.435, output: 0.87, cacheRead: 0.003625 },
+      },
+      {
+        pattern: "deepseek-chat",
+        limits: { contextWindow: 64_000, maxOutputTokens: 8_000 },
+        cost: { input: 0.27, output: 1.1, cacheRead: 0.07 },
+      },
+      {
+        pattern: "deepseek-reasoner",
+        capabilities: { reasoning: true },
+        limits: { contextWindow: 64_000, maxOutputTokens: 8_000 },
+        cost: { input: 0.55, output: 2.19, cacheRead: 0.14 },
+      },
     ],
     catalog: [
       {
-        model: "deepseek-chat",
-        label: "DeepSeek V3 Chat",
+        model: "deepseek-v4-flash",
+        label: "DeepSeek V4 Flash",
         openWeight: true,
         recommended: true,
-        note: "开放权重、低价，官方直连",
+        note: "开放权重、官方直连；优先使用赠送余额，超出后按量计费",
       },
       {
-        model: "deepseek-reasoner",
-        label: "DeepSeek R1 Reasoner",
+        model: "deepseek-v4-pro",
+        label: "DeepSeek V4 Pro",
         openWeight: true,
-        note: "开放权重推理模型",
+        note: "更强的官方模型，按量计费",
       },
     ],
   }),
@@ -354,6 +371,41 @@ const OPENAI_BUILTINS: OpenAICompatibleProviderRegistration[] = [
       reasoningEffort: false,
       capabilities: { ...cloudDefaults, images: true },
       limits: { contextWindow: 128_000, maxOutputTokens: 16_000 },
+      models: [
+        {
+          pattern: "gemini-3.5-flash",
+          limits: { contextWindow: 1_048_576, maxOutputTokens: 65_536 },
+        },
+        {
+          pattern: "gemini-3.1-flash-lite",
+          limits: { contextWindow: 1_048_576, maxOutputTokens: 65_536 },
+        },
+        {
+          pattern: "gemini-2.5-flash*",
+          limits: { contextWindow: 1_048_576, maxOutputTokens: 65_536 },
+        },
+      ],
+      catalog: [
+        {
+          model: "gemini-3.5-flash",
+          label: "Gemini 3.5 Flash（免费层）",
+          free: true,
+          recommended: true,
+          note: "稳定版；免费层含输入与输出 token，适合 coding agent",
+        },
+        {
+          model: "gemini-3.1-flash-lite",
+          label: "Gemini 3.1 Flash-Lite（免费层）",
+          free: true,
+          note: "稳定版；免费层高吞吐、低延迟",
+        },
+        {
+          model: "gemini-2.5-flash-lite",
+          label: "Gemini 2.5 Flash-Lite（免费层）",
+          free: true,
+          note: "兼容备选；免费层含输入与输出 token",
+        },
+      ],
     },
   ),
   openAI("xai", "xAI", "https://api.x.ai/v1", "XAI_API_KEY", {
@@ -585,7 +637,7 @@ for (const builtin of OPENAI_BUILTINS) registerOpenAICompatibleProvider(builtin)
 
 const debugDescriptor = descriptor({
   id: "debug",
-  name: "anicode Debug",
+  name: "AniCode Zen Debug",
   kind: "debug",
   protocol: "debug",
   aliases: ["demo"],
@@ -685,13 +737,38 @@ const SMALL_MODELS: Record<string, string> = {
   anthropic: "anthropic/claude-haiku-4-5-20251001",
   openai: "openai/gpt-5-mini",
   openrouter: "openrouter/meta-llama/llama-3.3-70b-instruct",
-  deepseek: "deepseek/deepseek-chat",
-  gemini: "gemini/gemini-2.5-flash",
+  deepseek: "deepseek/deepseek-v4-flash",
+  gemini: "gemini/gemini-3.1-flash-lite",
   xai: "xai/grok-3-mini",
   groq: "groq/llama-3.1-8b-instant",
   mistral: "mistral/mistral-small-latest",
   cerebras: "cerebras/llama3.1-8b",
 };
+
+/** 未显式指定模型时，按凭证就绪状态挑选云端默认模型。 */
+const DEFAULT_MODEL_PREFERENCES = [
+  "deepseek/deepseek-v4-flash",
+  "opencode/big-pickle",
+  "openrouter/deepseek/deepseek-r1:free",
+  "groq/deepseek-r1-distill-llama-70b",
+  "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+  "anthropic/claude-opus-4-8",
+  "openai/gpt-5",
+  "gemini/gemini-3.5-flash",
+  "xai/grok-3",
+] as const;
+
+export function resolveDefaultModel(): string {
+  for (const spec of DEFAULT_MODEL_PREFERENCES) {
+    try {
+      const diagnostics = diagnoseProvider(spec);
+      if (diagnostics.requiresApiKey && diagnostics.hasCredentials) return spec;
+    } catch {
+      // 某个可选 provider 未注册时继续尝试下一项。
+    }
+  }
+  return "debug/demo";
+}
 
 export function defaultSmallModel(providerId: string | undefined): string | undefined {
   if (!providerId) return undefined;

@@ -6,7 +6,10 @@ import { Markdown } from "../markdown.js";
 
 interface Props {
   state: ChatState;
-  onAnswerPermission: (permId: string, decision: "allow" | "allow_remember" | "allow_always" | "deny") => void;
+  onAnswerPermission: (
+    permId: string,
+    decision: "allow" | "allow_remember" | "allow_always" | "deny",
+  ) => void;
 }
 
 export function ChatView({ state, onAnswerPermission }: Props) {
@@ -55,8 +58,8 @@ function EmptyState() {
       <h1>{t("What would you like to do today?", "今天需要做点什么？")}</h1>
       <p>
         {t(
-          "Type a request to start chatting. Uses the zero-network debug/demo model by default; switch it in the bottom-right.",
-          "输入需求开始对话。默认使用零网络的 debug/demo 模型，可在右下角切换。",
+          "Type a request to start chatting. The configured default model is ready; switch it in the bottom-right.",
+          "输入需求开始对话。已使用配置的默认模型，也可在右下角切换。",
         )}
       </p>
     </div>
@@ -134,7 +137,10 @@ function PermissionCard({
   extra,
 }: {
   pending: PendingPerm;
-  onAnswer: (permId: string, decision: "allow" | "allow_remember" | "allow_always" | "deny") => void;
+  onAnswer: (
+    permId: string,
+    decision: "allow" | "allow_remember" | "allow_always" | "deny",
+  ) => void;
   extra: number;
 }) {
   return (

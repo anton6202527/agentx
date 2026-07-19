@@ -2,8 +2,8 @@
   "name": "@anicode/app",
   "version": "0.0.1",
   "private": true,
-  "description": "anicode 桌面应用（Electron）—— ChatGPT 风格界面 + 插件市场，复用 @anicode/core",
-  "author": "anicode",
+  "description": "AniCode Zen 桌面应用（Electron）—— ChatGPT 风格界面 + 插件市场，复用 @anicode/core",
+  "author": "AniCode Zen",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
@@ -16,7 +16,7 @@
   },
   "build": {
     "appId": "dev.anicode.app",
-    "productName": "anicode",
+    "productName": "AniCode Zen",
     "electronVersion": "43.1.0",
     "directories": {
       "output": "release",

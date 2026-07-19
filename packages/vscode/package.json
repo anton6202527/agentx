@@ -1,11 +1,11 @@
 {
   "name": "anicode-vscode",
-  "displayName": "anicode",
-  "description": "anicode —— 在 VSCode 侧边栏里与自研 coding agent 对话（复用 @anicode/core）",
+  "displayName": "AniCode Zen",
+  "description": "AniCode Zen —— 在 VSCode 侧边栏里与自研 coding agent 对话（复用 @anicode/core）",
   "version": "0.0.1",
   "private": true,
   "publisher": "anicode",
-  "author": "anicode",
+  "author": "AniCode Zen",
   "engines": { "vscode": "^1.85.0" },
   "categories": ["AI", "Chat", "Programming Languages"],
   "main": "./out/extension.js",
@@ -21,7 +21,7 @@
   "contributes": {
     "viewsContainers": {
       "activitybar": [
-        { "id": "anicode", "title": "anicode", "icon": "media/icon.svg" }
+        { "id": "anicode", "title": "AniCode Zen", "icon": "media/icon.svg" }
       ]
     },
     "views": {
@@ -30,10 +30,10 @@
       ]
     },
     "commands": [
-      { "command": "anicode.newSession", "title": "anicode: 新对话", "icon": "$(add)" },
-      { "command": "anicode.pickModel", "title": "anicode: 选择模型", "icon": "$(list-selection)" },
-      { "command": "anicode.resume", "title": "anicode: 恢复会话", "icon": "$(history)" },
-      { "command": "anicode.focus", "title": "anicode: 打开对话面板" }
+      { "command": "anicode.newSession", "title": "AniCode Zen: 新对话", "icon": "$(add)" },
+      { "command": "anicode.pickModel", "title": "AniCode Zen: 选择模型", "icon": "$(list-selection)" },
+      { "command": "anicode.resume", "title": "AniCode Zen: 恢复会话", "icon": "$(history)" },
+      { "command": "anicode.focus", "title": "AniCode Zen: 打开对话面板" }
     ],
     "menus": {
       "view/title": [

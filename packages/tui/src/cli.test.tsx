@@ -137,7 +137,7 @@ test("CLI: 无 --model 时不硬耦合 ANTHROPIC_API_KEY，无凭证回退 debug
 
     // 配了某个云端 key → 默认挑那个 provider，不再要求 ANTHROPIC_API_KEY。
     process.env["DEEPSEEK_API_KEY"] = "sk-test";
-    assert.equal(resolveDefaultModel(), "deepseek/deepseek-chat");
+    assert.equal(resolveDefaultModel(), "deepseek/deepseek-v4-flash");
 
     // 显式 --model 仍标记为 explicit（运行时不覆盖）。
     assert.equal(parseArgs(["--model", "openai/gpt-x"]).modelExplicit, true);

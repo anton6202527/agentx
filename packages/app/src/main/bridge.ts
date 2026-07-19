@@ -17,6 +17,7 @@ import {
   listModelCatalog,
   listProviderDetails,
   probeLocalProviders,
+  resolveDefaultModel,
   t,
   type OpenHandle,
   type PermissionDecisionKind,
@@ -33,6 +34,8 @@ export interface BridgeOptions {
   modelsFile: string;
   appName: string;
   appVersion: string;
+  /** 项目配置指定的默认模型；缺省时按已配置凭证自动选择。 */
+  defaultModel?: string;
   /** 可注入的 MCP 连接器与环境（测试用）；默认走 core 的真实实现与 process.env。 */
   mcpConnector?: McpConnector;
   env?: NodeJS.ProcessEnv;
@@ -281,6 +284,7 @@ export class Bridge {
       version: this.options.appVersion,
       cwd: this.options.cwd,
       sessionsDir: this.options.sessionsDir,
+      defaultModel: this.options.defaultModel ?? resolveDefaultModel(),
       inspectProviderCredentials: true,
     };
   }

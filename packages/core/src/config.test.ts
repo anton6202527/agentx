@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadConfig, toMcpServerConfigs, toSubagentDefinitions } from "./config.js";
+import { loadConfig, loadProjectEnv, toMcpServerConfigs, toSubagentDefinitions } from "./config.js";
 
 async function tmp(): Promise<{ home: string; cwd: string; cleanup: () => Promise<void> }> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "anicode-cfg-"));
@@ -64,6 +64,26 @@ test("config: 无任何文件时返回空配置且无告警", async () => {
   assert.deepEqual(config, {});
   assert.deepEqual(sources, []);
   assert.deepEqual(warnings, []);
+  await cleanup();
+});
+
+test("config: 项目 env 安全加载，已有环境与 .env.local 优先", async () => {
+  const { cwd, cleanup } = await tmp();
+  await fs.writeFile(
+    path.join(cwd, ".env"),
+    'DEEPSEEK_API_KEY=base-key\nQUOTED="hello world"\nINLINE=value # comment\n',
+  );
+  await fs.writeFile(
+    path.join(cwd, ".env.local"),
+    "export DEEPSEEK_API_KEY=local-key\nLOCAL_ONLY='yes'\n",
+  );
+  const env: NodeJS.ProcessEnv = { QUOTED: "from-shell" };
+  const loaded = await loadProjectEnv({ cwd, env });
+  assert.deepEqual(loaded, [path.join(cwd, ".env.local"), path.join(cwd, ".env")]);
+  assert.equal(env.DEEPSEEK_API_KEY, "local-key");
+  assert.equal(env.QUOTED, "from-shell");
+  assert.equal(env.INLINE, "value");
+  assert.equal(env.LOCAL_ONLY, "yes");
   await cleanup();
 });
 

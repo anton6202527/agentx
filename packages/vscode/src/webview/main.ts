@@ -54,8 +54,8 @@ const textarea = document.createElement("textarea");
 textarea.className = "input";
 textarea.rows = 1;
 textarea.placeholder = t(
-  "Message anicode… (Enter to send, Shift+Enter for newline)",
-  "给 anicode 发消息…（Enter 发送，Shift+Enter 换行）",
+  "Message AniCode Zen… (Enter to send, Shift+Enter for newline)",
+  "给 AniCode Zen 发消息…（Enter 发送，Shift+Enter 换行）",
 );
 const sendBtn = button("send", submit);
 sendBtn.textContent = "↑";

@@ -82,6 +82,66 @@ export interface LoadedConfig {
   warnings: string[];
 }
 
+export interface LoadProjectEnvOptions {
+  cwd?: string;
+  /** 可注入环境对象，便于测试；默认写入当前进程环境。 */
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * 加载项目级 `.env.local` / `.env`，供 TUI、Electron 与 VSCode 共用。
+ *
+ * 只解析 KEY=VALUE，不执行 shell；进程已有变量优先，`.env.local` 优先于 `.env`。
+ * 返回实际读取到的文件路径，文件不存在时静默跳过。
+ */
+export async function loadProjectEnv(opts: LoadProjectEnvOptions = {}): Promise<string[]> {
+  const cwd = opts.cwd ?? process.cwd();
+  const env = opts.env ?? process.env;
+  const loaded: string[] = [];
+  for (const name of [".env.local", ".env"]) {
+    const file = path.join(cwd, name);
+    let raw: string;
+    try {
+      raw = await fs.readFile(file, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    for (const [key, value] of parseEnv(raw)) {
+      if (env[key] === undefined) env[key] = value;
+    }
+    loaded.push(file);
+  }
+  return loaded;
+}
+
+function parseEnv(raw: string): [string, string][] {
+  const entries: [string, string][] = [];
+  for (const sourceLine of raw.split(/\r?\n/)) {
+    const line = sourceLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const normalized = line.startsWith("export ") ? line.slice(7).trimStart() : line;
+    const eq = normalized.indexOf("=");
+    if (eq <= 0) continue;
+    const key = normalized.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let value = normalized.slice(eq + 1).trim();
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      const quote = value[0];
+      value = value.slice(1, -1);
+      if (quote === '"') value = value.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
+    } else {
+      value = value.replace(/\s+#.*$/, "").trimEnd();
+    }
+    entries.push([key, value]);
+  }
+  return entries;
+}
+
 const KNOWN_KEYS = new Set([
   "model",
   "smallModel",

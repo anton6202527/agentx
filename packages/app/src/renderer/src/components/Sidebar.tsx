@@ -26,7 +26,7 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <div className="sidebar-top">
-        <div className="brand">◆ anicode</div>
+        <div className="brand">◆ AniCode Zen</div>
         <button className="new-chat" onClick={onNew}>
           ＋ {t("New chat", "新对话")}
         </button>

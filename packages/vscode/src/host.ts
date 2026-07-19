@@ -16,8 +16,6 @@ import {
   t,
 } from "@anicode/core";
 
-export const DEFAULT_MODEL = "debug/demo";
-
 /** debug/本地 provider 免 key；云端缺 key 给出清晰错误。 */
 export function resolveConfiguredProvider(model: string) {
   const d = diagnoseProvider(model);

@@ -25,4 +25,5 @@ npm run watch --workspace @anicode/vscode    # 监听重建
 npm run package --workspace @anicode/vscode
 ```
 
-默认使用零网络的 `debug/demo` 模型，开箱即用；云端模型需配置相应环境变量。
+默认使用项目配置或已就绪凭证对应的模型，并自动读取工作区根目录的 `.env.local` / `.env`；
+没有可用云端凭证时回退到零网络的 `debug/demo`。

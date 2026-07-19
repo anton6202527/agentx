@@ -59,7 +59,7 @@ export function App() {
     [appInfo, refreshSessions],
   );
 
-  // 首屏加载：元数据 + 一个默认会话（零网络 debug/demo，开箱即用）。
+  // 首屏加载：主进程结合项目配置与凭证选出默认模型；无可用云端凭证时回退 debug/demo。
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -77,7 +77,11 @@ export function App() {
         setProviders(provs);
         setPlugins(plugs);
         setUserModels(ums);
-        const meta = await window.anicode.createSession({ cwd: info.cwd, model: DEFAULT_MODEL });
+        setCurrentModel(info.defaultModel);
+        const meta = await window.anicode.createSession({
+          cwd: info.cwd,
+          model: info.defaultModel,
+        });
         if (cancelled) return;
         setCurrentId(meta.id);
         void refreshSessions();

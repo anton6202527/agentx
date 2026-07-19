@@ -27,6 +27,7 @@ export {
   listProviders,
   listProviderDetails,
   listModelCatalog,
+  resolveDefaultModel,
   defaultSmallModel,
   estimateCostUSD,
   type ModelCost,
@@ -135,12 +136,14 @@ export {
 } from "./mcp.js";
 export {
   loadConfig,
+  loadProjectEnv,
   toMcpServerConfigs,
   toSubagentDefinitions,
   toLspServers,
   type AnicodeConfig,
   type ConfigAgent,
   type LoadedConfig,
+  type LoadProjectEnvOptions,
 } from "./config.js";
 export {
   LspClient,
