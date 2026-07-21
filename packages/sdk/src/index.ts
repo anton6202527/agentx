@@ -56,6 +56,8 @@ export class AnicodeApiError extends Error {
 
 export interface SubscribeOptions {
   signal?: AbortSignal;
+  /** 断线续传：从该事件 id 之后增量补发（缓冲失效时 server 回落整份快照）。 */
+  lastEventId?: string;
 }
 
 export interface AnicodeClient {
@@ -91,10 +93,16 @@ export interface AnicodeClient {
   };
   event: {
     /**
-     * 订阅会话事件流（SSE 信封）。首帧保证 server.connected，随后 session.snapshot，
-     * 之后实时事件。流断开即结束（不自动重连），signal 可主动取消。
+     * 订阅会话事件流（SSE 信封）。首帧保证 server.connected，随后 session.snapshot
+     * （或 lastEventId 续传时的增量补发），之后实时事件。流断开即结束（不自动重连），
+     * signal 可主动取消。
      */
     subscribe(sessionId: string, opts?: SubscribeOptions): AsyncGenerator<EventEnvelope>;
+    /**
+     * 订阅全局 firehose（GET /events）：跨所有 live 会话的事件流，每帧 properties
+     * 带 sessionId。用于监控/多会话面板。同样支持 lastEventId 续传。
+     */
+    subscribeAll(opts?: SubscribeOptions): AsyncGenerator<EventEnvelope>;
   };
 }
 
@@ -147,14 +155,15 @@ export function createAnicodeClient(opts: AnicodeClientOptions): AnicodeClient {
 
   const sid = (id: string) => encodeURIComponent(id);
 
-  async function* subscribe(
-    sessionId: string,
-    subOpts: SubscribeOptions = {},
+  async function* streamSse(
+    path: string,
+    subOpts: SubscribeOptions,
   ): AsyncGenerator<EventEnvelope> {
-    const url = new URL(`${baseUrl}/sessions/${sid(sessionId)}/events`);
+    const url = new URL(`${baseUrl}${path}`);
     if (opts.token) url.searchParams.set("token", opts.token);
+    if (subOpts.lastEventId) url.searchParams.set("lastEventId", subOpts.lastEventId);
     const res = await doFetch(url, {
-      headers: headers(),
+      headers: headers(subOpts.lastEventId ? { "last-event-id": subOpts.lastEventId } : {}),
       ...(subOpts.signal ? { signal: subOpts.signal } : {}),
     });
     if (!res.ok || !res.body)
@@ -174,6 +183,14 @@ export function createAnicodeClient(opts: AnicodeClientOptions): AnicodeClient {
     } finally {
       await reader.cancel().catch(() => {});
     }
+  }
+
+  function subscribe(sessionId: string, subOpts: SubscribeOptions = {}) {
+    return streamSse(`/sessions/${sid(sessionId)}/events`, subOpts);
+  }
+
+  function subscribeAll(subOpts: SubscribeOptions = {}) {
+    return streamSse(`/events`, subOpts);
   }
 
   return {
@@ -228,6 +245,6 @@ export function createAnicodeClient(opts: AnicodeClientOptions): AnicodeClient {
       },
       listProfiles: (sessionId) => call("GET", `/sessions/${sid(sessionId)}/permission-profiles`),
     },
-    event: { subscribe },
+    event: { subscribe, subscribeAll },
   };
 }

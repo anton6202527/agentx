@@ -57,6 +57,13 @@ export const ROUTES: RouteDef[] = [
   },
   {
     method: "get",
+    path: "/events",
+    summary: "全局事件流 firehose（SSE 信封，跨所有 live 会话）；支持 Last-Event-ID 续传",
+    response: "sse",
+    tag: "global",
+  },
+  {
+    method: "get",
     path: "/sessions",
     summary: "列出会话",
     response: { type: "array", items: SESSION_SUMMARY },
@@ -99,7 +106,7 @@ export const ROUTES: RouteDef[] = [
   {
     method: "get",
     path: "/sessions/{id}/events",
-    summary: "订阅事件流（SSE 信封）",
+    summary: "订阅会话事件流（SSE 信封）；断线可用 Last-Event-ID 头/?lastEventId= 续传",
     response: "sse",
     tag: "session",
   },
@@ -365,7 +372,9 @@ export function generateOpenApi(): Record<string, unknown> {
       title: "anicode server",
       version: `${PROTOCOL_VERSION}.0.0`,
       description:
-        "AniCode server-first HTTP API。鉴权：可选 Bearer token（SSE 可用 ?token= 查询参数）。",
+        "AniCode server-first HTTP API。鉴权：可选 Bearer token（SSE 可用 ?token= 查询参数）。" +
+        "多实例路由：请求可带 x-anicode-directory 头或 ?directory= 选择按目录隔离的会话实例（server 配置 resolveInstance 时生效，否则忽略）。" +
+        "SSE 续传：事件帧携带 id，断线重连带 Last-Event-ID 头（或 ?lastEventId=）可增量补发丢失事件，缓冲失效时自动回落整份快照。",
     },
     paths,
     components: { schemas: COMPONENT_SCHEMAS },

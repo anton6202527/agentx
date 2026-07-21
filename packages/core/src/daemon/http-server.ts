@@ -12,13 +12,21 @@
  *     part id），供 SDK/外部客户端做 UI 无关渲染
  *   - permission.asked/replied、session.status/updated/reverted 为命名细粒度事件
  *
+ * 三项 server-first 能力：
+ *   1. **Last-Event-ID 续传**：可续传事件帧带 `id:`（SSE 规范字段），断线重连带
+ *      `Last-Event-ID` 头或 `?lastEventId=` 时，从每流的环形缓冲增量补发；缓冲已
+ *      淘汰该 id 时回落整份 session.snapshot（会话流）或直接续流（firehose）。
+ *   2. **全局 firehose** `GET /events`：跨所有 live 会话的监控流（manager.subscribeAll）。
+ *   3. **目录级多实例路由**：请求带 `x-anicode-directory` 头 / `?directory=` 时经
+ *      `resolveInstance` 惰性路由到按目录隔离的 SessionManager（未配置则忽略、用默认实例）。
+ *
  * 安全：默认只应绑定 127.0.0.1；可选 token —— 提供时所有请求须带
  * `Authorization: Bearer <token>`（SSE 亦可用 `?token=` 查询参数，便于 EventSource）。
  */
 
 import * as http from "node:http";
 import { t } from "../i18n.js";
-import { SessionManager, type SessionEvent } from "../session-manager.js";
+import { SessionManager, type SessionEvent, type SessionSnapshot } from "../session-manager.js";
 import type { PermissionDecisionKind } from "../host.js";
 import type { PermissionMode } from "../permission.js";
 import { PartsProjector, messagesToParts } from "../parts.js";
@@ -26,9 +34,23 @@ import { createId } from "../id.js";
 import { generateOpenApi, PROTOCOL_VERSION, type EventEnvelope } from "./api.js";
 
 export interface HttpDaemonOptions {
+  /** 默认会话实例（无目录路由、或未配置 resolveInstance 时的实例）。 */
   manager: SessionManager;
   /** 可选 Bearer token；提供时所有请求都要求携带。 */
   token?: string;
+  /**
+   * 目录级多实例路由（对齐 opencode 单 server 多工程）：给定请求携带的目录，
+   * 返回该目录对应的 SessionManager（可异步惰性 boot）。返回值按目录 memoize。
+   * 省略则不启用路由，所有请求走 `manager`。
+   */
+  resolveInstance?: (directory: string) => SessionManager | Promise<SessionManager>;
+  /** 每个 SSE 流保留的可续传事件条数（Last-Event-ID 回放窗口）。默认 1024。 */
+  replayBufferSize?: number;
+  /**
+   * 最后一个订阅者断开后，会话扇出（及其 replay 缓冲）延迟释放的毫秒数。
+   * 让单客户端断线重连仍能在窗口内增量补发；窗口外回落整份快照。默认 15000。
+   */
+  feedLingerMs?: number;
 }
 
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -69,31 +91,116 @@ function envelope(type: string, properties: Record<string, unknown>): EventEnvel
   return { id: createId("evt"), type, properties };
 }
 
-/** SSE 帧：信封 JSON 单 data 行（JSON.stringify 无裸换行）。 */
-function sseWrite(res: http.ServerResponse, ev: EventEnvelope): void {
+/** 可续传事件帧：带 `id:`，浏览器 EventSource 会据此在重连时回发 Last-Event-ID。 */
+function sseEvent(res: http.ServerResponse, ev: EventEnvelope): void {
+  res.write(`id: ${ev.id}\ndata: ${JSON.stringify(ev)}\n\n`);
+}
+
+/** 控制帧（connected/heartbeat/snapshot）：不带 `id:`，不参与 Last-Event-ID 定位。 */
+function sseControl(res: http.ServerResponse, ev: EventEnvelope): void {
   res.write(`data: ${JSON.stringify(ev)}\n\n`);
 }
 
-/**
- * 每会话一份共享的事件扇出：单一 manager 订阅 + 单一 PartsProjector，
- * 广播给全部 SSE 连接（保证 part id 跨订阅端一致、投影恰好处理一次）。
- */
+/** SessionEvent → 命名细粒度事件（含 Message+Parts 投影）。 */
+function deriveNamedEvents(
+  sessionId: string,
+  projector: PartsProjector,
+  event: SessionEvent,
+): EventEnvelope[] {
+  switch (event.type) {
+    case "agent":
+      return projector
+        .handle(event.event)
+        .map((p) => envelope(p.type, p.properties as unknown as Record<string, unknown>));
+    case "permission_request":
+      return [
+        envelope("permission.asked", {
+          sessionId,
+          permId: event.permId,
+          toolName: event.toolName,
+          ruleKey: event.ruleKey,
+        }),
+      ];
+    case "permission_resolved":
+      return [
+        envelope("permission.replied", {
+          sessionId,
+          permId: event.permId,
+          decision: event.decision,
+        }),
+      ];
+    case "title":
+      return [envelope("session.updated", { sessionId, title: event.title })];
+    case "state":
+      return [envelope("session.status", { sessionId, running: event.running })];
+    case "reverted": {
+      const { type: _type, ...rest } = event;
+      return [envelope("session.reverted", { sessionId, ...rest })];
+    }
+    default:
+      return [];
+  }
+}
+
+/** 有界环形缓冲：支持按 Last-Event-ID 回放其后事件（未命中返回 null → 需整份重同步）。 */
+class EventRing {
+  private buf: EventEnvelope[] = [];
+  constructor(private max: number) {}
+  push(ev: EventEnvelope): void {
+    this.buf.push(ev);
+    if (this.buf.length > this.max) this.buf.shift();
+  }
+  replayAfter(id: string): EventEnvelope[] | null {
+    const i = this.buf.findIndex((e) => e.id === id);
+    return i === -1 ? null : this.buf.slice(i + 1);
+  }
+}
+
+type Writer = (ev: EventEnvelope) => void;
+
+/** 单会话事件扇出：一份 manager 订阅 + 一份 PartsProjector + 环形缓冲，广播给多连接。 */
 interface SessionFeed {
+  writers: Set<Writer>;
+  ring: EventRing;
+  peek: () => SessionSnapshot | undefined;
+  linger?: NodeJS.Timeout;
   close: () => void;
-  writers: Set<(ev: EventEnvelope) => void>;
+}
+
+/** 全局 firehose 扇出：manager.subscribeAll + 每会话惰性 projector + 环形缓冲。 */
+interface Firehose {
+  writers: Set<Writer>;
+  ring: EventRing;
+  close: () => void;
+}
+
+/** 每个 SessionManager 实例独立的流状态（目录路由下各实例互不干扰）。 */
+interface InstanceStreams {
+  manager: SessionManager;
+  feeds: Map<string, SessionFeed>;
+  firehose?: Firehose;
 }
 
 export class HttpDaemonServer {
   private server: http.Server;
-  private manager: SessionManager;
+  private defaultManager: SessionManager;
   private token?: string;
+  private resolveInstance?: (directory: string) => SessionManager | Promise<SessionManager>;
+  private replayBufferSize: number;
+  private feedLingerMs: number;
   /** 活跃 SSE 连接的清理器，close 时逐个断开。 */
   private sseCleanups = new Set<() => void>();
-  private feeds = new Map<string, SessionFeed>();
+  /** 目录 → 实例的 memo（并发 boot 去重）。 */
+  private instances = new Map<string, Promise<SessionManager>>();
+  /** manager → 流状态；close 时统一释放。 */
+  private streams = new Map<SessionManager, InstanceStreams>();
 
   constructor(opts: HttpDaemonOptions) {
-    this.manager = opts.manager;
+    this.defaultManager = opts.manager;
     if (opts.token) this.token = opts.token;
+    if (opts.resolveInstance) this.resolveInstance = opts.resolveInstance;
+    this.replayBufferSize = opts.replayBufferSize ?? 1024;
+    this.feedLingerMs = opts.feedLingerMs ?? 15_000;
     this.server = http.createServer((req, res) => {
       void this.route(req, res).catch((err) => {
         if (!res.headersSent)
@@ -120,6 +227,14 @@ export class HttpDaemonServer {
   close(): Promise<void> {
     for (const cleanup of this.sseCleanups) cleanup();
     this.sseCleanups.clear();
+    for (const inst of this.streams.values()) {
+      for (const feed of inst.feeds.values()) {
+        if (feed.linger) clearTimeout(feed.linger);
+        feed.close();
+      }
+      inst.firehose?.close();
+    }
+    this.streams.clear();
     return new Promise((res) => this.server.close(() => res()));
   }
 
@@ -131,6 +246,42 @@ export class HttpDaemonServer {
     return url.searchParams.get("token") === this.token;
   }
 
+  /** 按请求携带的目录路由到实例（未配置 resolveInstance 或无目录 → 默认实例）。 */
+  private async managerFor(req: http.IncomingMessage, url: URL): Promise<SessionManager> {
+    if (!this.resolveInstance) return this.defaultManager;
+    const header = req.headers["x-anicode-directory"];
+    const directory =
+      (typeof header === "string" ? header : undefined) ??
+      url.searchParams.get("directory") ??
+      undefined;
+    if (!directory) return this.defaultManager;
+    let pending = this.instances.get(directory);
+    if (!pending) {
+      pending = Promise.resolve(this.resolveInstance(directory));
+      this.instances.set(directory, pending);
+      pending.catch(() => this.instances.delete(directory)); // boot 失败不缓存
+    }
+    return pending;
+  }
+
+  private streamsFor(manager: SessionManager): InstanceStreams {
+    let inst = this.streams.get(manager);
+    if (!inst) {
+      inst = { manager, feeds: new Map() };
+      this.streams.set(manager, inst);
+    }
+    return inst;
+  }
+
+  private lastEventId(req: http.IncomingMessage, url: URL): string | undefined {
+    const header = req.headers["last-event-id"];
+    return (
+      (typeof header === "string" ? header : undefined) ??
+      url.searchParams.get("lastEventId") ??
+      undefined
+    );
+  }
+
   private async route(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (!this.authorized(req, url)) return json(res, 401, { error: "unauthorized" });
@@ -140,8 +291,14 @@ export class HttpDaemonServer {
       if (url.pathname === "/global/health")
         return json(res, 200, { ok: true, name: "anicode", protocol: PROTOCOL_VERSION });
       if (url.pathname === "/doc") return json(res, 200, generateOpenApi());
-      if (url.pathname === "/sessions") return json(res, 200, await this.manager.listSessions());
+      if (url.pathname === "/events")
+        return this.firehose(await this.managerFor(req, url), res, this.lastEventId(req, url));
     }
+
+    const manager = await this.managerFor(req, url);
+
+    if (req.method === "GET" && url.pathname === "/sessions")
+      return json(res, 200, await manager.listSessions());
     if (req.method === "POST" && url.pathname === "/sessions") {
       const body = JSON.parse((await readBody(req)) || "{}") as {
         cwd?: string;
@@ -149,7 +306,7 @@ export class HttpDaemonServer {
         title?: string;
       };
       if (!body.cwd || !body.model) return json(res, 400, { error: "cwd and model are required" });
-      const meta = await this.manager.createSession({
+      const meta = await manager.createSession({
         cwd: body.cwd,
         model: body.model,
         ...(body.title ? { title: body.title } : {}),
@@ -162,17 +319,17 @@ export class HttpDaemonServer {
     if (mSelf) {
       const sessionId = decodeURIComponent(mSelf[1]!);
       if (req.method === "GET") {
-        const snap = await this.snapshotOf(sessionId);
+        const snap = await this.snapshotOf(manager, sessionId);
         return snap ? json(res, 200, snap) : json(res, 404, { error: "not found" });
       }
       if (req.method === "DELETE") {
-        await this.manager.deleteSession(sessionId);
+        await manager.deleteSession(sessionId);
         return noContent(res);
       }
       if (req.method === "PATCH") {
         const body = JSON.parse((await readBody(req)) || "{}") as { title?: string };
         if (!body.title) return json(res, 400, { error: "title is required" });
-        await this.manager.setTitle(sessionId, body.title);
+        await manager.setTitle(sessionId, body.title);
         return noContent(res);
       }
       return json(res, 405, { error: "method not allowed" });
@@ -184,15 +341,15 @@ export class HttpDaemonServer {
     const action = m[2]!;
 
     if (req.method === "GET") {
-      if (action === "events") return this.sse(sessionId, res);
+      if (action === "events") return this.sse(manager, sessionId, res, this.lastEventId(req, url));
       if (action === "messages") {
-        const snap = await this.snapshotOf(sessionId);
+        const snap = await this.snapshotOf(manager, sessionId);
         if (!snap) return json(res, 404, { error: "not found" });
         return json(res, 200, messagesToParts(sessionId, snap.messages));
       }
-      if (action === "checkpoints") return json(res, 200, this.manager.listCheckpoints(sessionId));
+      if (action === "checkpoints") return json(res, 200, manager.listCheckpoints(sessionId));
       if (action === "permission-profiles")
-        return json(res, 200, await this.manager.listPermissionProfiles(sessionId));
+        return json(res, 200, await manager.listPermissionProfiles(sessionId));
     }
 
     if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
@@ -200,38 +357,38 @@ export class HttpDaemonServer {
 
     switch (action) {
       case "send":
-        await this.manager.send(
+        await manager.send(
           sessionId,
           String(body.text ?? ""),
           typeof body.model === "string" && body.model ? { model: body.model } : undefined,
         );
         return noContent(res);
       case "interrupt":
-        await this.manager.interrupt(sessionId);
+        await manager.interrupt(sessionId);
         return noContent(res);
       case "undo":
         return json(
           res,
           200,
-          await this.manager.undo(
+          await manager.undo(
             sessionId,
             typeof body.checkpointId === "string" ? body.checkpointId : undefined,
             body.mode === "conversation" || body.mode === "both" ? body.mode : "files",
           ),
         );
       case "compact":
-        return json(res, 200, await this.manager.compact(sessionId));
+        return json(res, 200, await manager.compact(sessionId));
       case "fork":
         return json(
           res,
           200,
-          await this.manager.forkSession(sessionId, {
+          await manager.forkSession(sessionId, {
             ...(typeof body.title === "string" ? { title: body.title } : {}),
             ...(typeof body.upToMessage === "number" ? { upToMessage: body.upToMessage } : {}),
           }),
         );
       case "permission": {
-        const answered = await this.manager.answerPermission(
+        const answered = await manager.answerPermission(
           sessionId,
           String(body.permId ?? ""),
           body.decision as PermissionDecisionKind,
@@ -239,10 +396,10 @@ export class HttpDaemonServer {
         return json(res, 200, { answered });
       }
       case "permission-mode":
-        await this.manager.setPermissionMode(sessionId, body.mode as PermissionMode);
+        await manager.setPermissionMode(sessionId, body.mode as PermissionMode);
         return noContent(res);
       case "permission-profile": {
-        const mode = await this.manager.setPermissionProfile(sessionId, String(body.name ?? ""));
+        const mode = await manager.setPermissionProfile(sessionId, String(body.name ?? ""));
         return json(res, 200, { mode });
       }
       default:
@@ -251,86 +408,61 @@ export class HttpDaemonServer {
   }
 
   /** live 快照；未加载则经 resumeSession 懒载入（不存在返回 undefined）。 */
-  private async snapshotOf(sessionId: string) {
-    const live = this.manager.peek(sessionId);
+  private async snapshotOf(manager: SessionManager, sessionId: string) {
+    const live = manager.peek(sessionId);
     if (live) return live;
     try {
-      await this.manager.resumeSession(sessionId);
+      await manager.resumeSession(sessionId);
     } catch {
       return undefined;
     }
-    return this.manager.peek(sessionId);
+    return manager.peek(sessionId);
   }
 
   /** 取（或建）会话的共享事件扇出。 */
-  private async feed(sessionId: string): Promise<SessionFeed> {
-    const existing = this.feeds.get(sessionId);
-    if (existing) return existing;
-    const writers = new Set<(ev: EventEnvelope) => void>();
+  private async sessionFeed(inst: InstanceStreams, sessionId: string): Promise<SessionFeed> {
+    const existing = inst.feeds.get(sessionId);
+    if (existing) {
+      // 复用扇出：取消 linger 释放计时（新订阅者接管缓冲）。
+      if (existing.linger) {
+        clearTimeout(existing.linger);
+        delete existing.linger;
+      }
+      return existing;
+    }
+    const writers = new Set<Writer>();
+    const ring = new EventRing(this.replayBufferSize);
     const projector = new PartsProjector(sessionId);
-    const broadcast = (ev: EventEnvelope) => {
+    const emit = (ev: EventEnvelope) => {
+      ring.push(ev);
       for (const w of writers) w(ev);
     };
-    const handle = await this.manager.open(sessionId, (event: SessionEvent) => {
-      broadcast(envelope("session.event", { sessionId, event }));
-      for (const named of this.namedEvents(sessionId, projector, event)) broadcast(named);
+    const handle = await inst.manager.open(sessionId, (event: SessionEvent) => {
+      emit(envelope("session.event", { sessionId, event }));
+      for (const named of deriveNamedEvents(sessionId, projector, event)) emit(named);
     });
     const feed: SessionFeed = {
       writers,
+      ring,
+      peek: () => inst.manager.peek(sessionId),
       close: () => {
         handle.close();
-        this.feeds.delete(sessionId);
+        inst.feeds.delete(sessionId);
       },
     };
-    this.feeds.set(sessionId, feed);
+    inst.feeds.set(sessionId, feed);
     return feed;
   }
 
-  /** SessionEvent → 命名细粒度事件（含 Message+Parts 投影）。 */
-  private namedEvents(
+  /** 订阅单会话：server.connected →（Last-Event-ID 增量补发 | session.snapshot）→ 实时。 */
+  private async sse(
+    manager: SessionManager,
     sessionId: string,
-    projector: PartsProjector,
-    event: SessionEvent,
-  ): EventEnvelope[] {
-    switch (event.type) {
-      case "agent":
-        return projector
-          .handle(event.event)
-          .map((p) => envelope(p.type, p.properties as unknown as Record<string, unknown>));
-      case "permission_request":
-        return [
-          envelope("permission.asked", {
-            sessionId,
-            permId: event.permId,
-            toolName: event.toolName,
-            ruleKey: event.ruleKey,
-          }),
-        ];
-      case "permission_resolved":
-        return [
-          envelope("permission.replied", {
-            sessionId,
-            permId: event.permId,
-            decision: event.decision,
-          }),
-        ];
-      case "title":
-        return [envelope("session.updated", { sessionId, title: event.title })];
-      case "state":
-        return [envelope("session.status", { sessionId, running: event.running })];
-      case "reverted": {
-        const { type: _type, ...rest } = event;
-        return [envelope("session.reverted", { sessionId, ...rest })];
-      }
-      default:
-        return [];
-    }
-  }
-
-  /** 订阅会话：server.connected → session.snapshot 先行，之后实时事件；断开即退订。 */
-  private async sse(sessionId: string, res: http.ServerResponse): Promise<void> {
-    const feed = await this.feed(sessionId);
-    const snapshot = this.manager.peek(sessionId);
+    res: http.ServerResponse,
+    lastEventId?: string,
+  ): Promise<void> {
+    const inst = this.streamsFor(manager);
+    const feed = await this.sessionFeed(inst, sessionId);
     res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
@@ -338,16 +470,86 @@ export class HttpDaemonServer {
       "x-accel-buffering": "no",
     });
     res.write("retry: 1000\n\n");
-    sseWrite(res, envelope("server.connected", { protocol: PROTOCOL_VERSION }));
-    sseWrite(res, envelope("session.snapshot", { sessionId, snapshot }));
+    sseControl(res, envelope("server.connected", { protocol: PROTOCOL_VERSION }));
 
-    const writer = (ev: EventEnvelope) => sseWrite(res, ev);
-    feed.writers.add(writer);
-    const heartbeat = setInterval(() => sseWrite(res, envelope("server.heartbeat", {})), 30_000);
+    const replay = lastEventId ? feed.ring.replayAfter(lastEventId) : null;
+    if (replay) {
+      // 增量补发：客户端已有状态，从断点续流，无需整份快照。
+      for (const ev of replay) sseEvent(res, ev);
+    } else {
+      // 首连或缓冲已淘汰该事件：回落整份快照重同步。
+      sseControl(res, envelope("session.snapshot", { sessionId, snapshot: feed.peek() }));
+    }
+
+    this.attach(res, feed.writers, () => {
+      // 最后一个订阅者断开：延迟释放，给断线重连留一个 replay 窗口。
+      if (feed.writers.size > 0 || feed.linger) return;
+      feed.linger = setTimeout(() => {
+        if (feed.writers.size === 0) feed.close();
+      }, this.feedLingerMs);
+      feed.linger.unref?.(); // 不因等待释放而拖住进程退出
+    });
+  }
+
+  /** 取（或建）全局 firehose 扇出（跨所有 live 会话）。 */
+  private ensureFirehose(inst: InstanceStreams): Firehose {
+    if (inst.firehose) return inst.firehose;
+    const writers = new Set<Writer>();
+    const ring = new EventRing(this.replayBufferSize);
+    const projectors = new Map<string, PartsProjector>();
+    const emit = (ev: EventEnvelope) => {
+      ring.push(ev);
+      for (const w of writers) w(ev);
+    };
+    const unsub = inst.manager.subscribeAll((sessionId, event) => {
+      emit(envelope("session.event", { sessionId, event }));
+      let projector = projectors.get(sessionId);
+      if (!projector) {
+        projector = new PartsProjector(sessionId);
+        projectors.set(sessionId, projector);
+      }
+      for (const named of deriveNamedEvents(sessionId, projector, event)) emit(named);
+    });
+    const firehose: Firehose = {
+      writers,
+      ring,
+      close: () => {
+        unsub();
+        delete inst.firehose;
+      },
+    };
+    inst.firehose = firehose;
+    return firehose;
+  }
+
+  /** 全局 firehose：server.connected →（Last-Event-ID 增量补发）→ 实时；不发快照。 */
+  private firehose(manager: SessionManager, res: http.ServerResponse, lastEventId?: string): void {
+    const inst = this.streamsFor(manager);
+    const fh = this.ensureFirehose(inst);
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    res.write("retry: 1000\n\n");
+    sseControl(res, envelope("server.connected", { protocol: PROTOCOL_VERSION }));
+    const replay = lastEventId ? fh.ring.replayAfter(lastEventId) : null;
+    if (replay) for (const ev of replay) sseEvent(res, ev);
+    this.attach(res, fh.writers, () => {
+      if (fh.writers.size === 0) fh.close();
+    });
+  }
+
+  /** 挂载一个 writer 到流：心跳 + 断开清理（含引用计数回收扇出）。 */
+  private attach(res: http.ServerResponse, writers: Set<Writer>, onEmpty: () => void): void {
+    const writer: Writer = (ev) => sseEvent(res, ev);
+    writers.add(writer);
+    const heartbeat = setInterval(() => sseControl(res, envelope("server.heartbeat", {})), 30_000);
     const cleanup = () => {
       clearInterval(heartbeat);
-      feed.writers.delete(writer);
-      if (feed.writers.size === 0) feed.close();
+      writers.delete(writer);
+      onEmpty();
       this.sseCleanups.delete(cleanup);
       res.end();
     };

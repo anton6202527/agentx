@@ -263,6 +263,13 @@ export class DaemonServer {
         });
       case "answerPermission":
         return this.manager.answerPermission(req.sessionId, req.permId, req.decision);
+      case "setPermissionMode":
+        await this.manager.setPermissionMode(req.sessionId, req.mode);
+        return null;
+      case "setPermissionProfile":
+        return this.manager.setPermissionProfile(req.sessionId, req.name);
+      case "listPermissionProfiles":
+        return this.manager.listPermissionProfiles(req.sessionId);
     }
   }
 }

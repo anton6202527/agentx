@@ -14,6 +14,9 @@ import type {
   SessionSummary,
 } from "../session-manager.js";
 import type { PermissionDecisionKind } from "../host.js";
+import type { PermissionMode } from "../permission.js";
+
+const PERMISSION_MODES: readonly string[] = ["default", "acceptEdits", "auto", "bypass", "plan"];
 
 const REWIND_MODES: readonly string[] = ["files", "conversation", "both"];
 
@@ -39,7 +42,13 @@ export type ClientRequest =
       sessionId: string;
       permId: string;
       decision: PermissionDecisionKind;
-    };
+    }
+  /** 运行时切换权限模式（/plan 等）。socket 与 HTTP 传输能力对齐。 */
+  | { id: number; method: "setPermissionMode"; sessionId: string; mode: PermissionMode }
+  /** 运行时切换权限档位，返回生效 mode。 */
+  | { id: number; method: "setPermissionProfile"; sessionId: string; name: string }
+  /** 列出会话可用的权限档位。 */
+  | { id: number; method: "listPermissionProfiles"; sessionId: string };
 
 // ---------- 守护进程 → 客户端 ----------
 
@@ -127,7 +136,16 @@ export function isClientRequest(value: unknown): value is ClientRequest {
     case "close":
     case "interrupt":
     case "compact":
+    case "listPermissionProfiles":
       return typeof frame.sessionId === "string";
+    case "setPermissionMode":
+      return (
+        typeof frame.sessionId === "string" &&
+        typeof frame.mode === "string" &&
+        PERMISSION_MODES.includes(frame.mode)
+      );
+    case "setPermissionProfile":
+      return typeof frame.sessionId === "string" && typeof frame.name === "string";
     case "undo":
       return (
         typeof frame.sessionId === "string" &&

@@ -98,6 +98,7 @@ export {
   type SessionSnapshot,
   type SessionSummary,
   type SessionListener,
+  type GlobalListener,
   type Checkpoint,
   type RewindMode,
   type PermissionAnswer,
@@ -124,7 +125,15 @@ export {
   type PermissionDecisionKind,
   LocalSessionHost,
 } from "./host.js";
-export { SessionStore, newSessionId, type SessionMeta, type SessionData } from "./session.js";
+export {
+  SessionStore,
+  newSessionId,
+  assertSessionId,
+  type ISessionStore,
+  type SessionMeta,
+  type SessionData,
+} from "./session.js";
+export { SqliteSessionStore, sqliteAvailable } from "./session-sqlite.js";
 export * from "./daemon/index.js";
 export {
   McpClient,

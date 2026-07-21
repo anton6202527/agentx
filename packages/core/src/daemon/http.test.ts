@@ -277,3 +277,185 @@ test("http SSE: 信封协议 —— server.connected 首帧、snapshot 次帧、
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+type Env = { id: string; type: string; properties: Record<string, unknown> };
+const CONTROL = new Set(["server.connected", "server.heartbeat", "session.snapshot"]);
+
+/**
+ * 后台 pump 读 SSE 流入数组，主循环轮询直到 predicate 满足或超时，然后中断连接。
+ * 关键：不在 `reader.read()` 上做时间判断（它会一直阻塞到有数据/30s 心跳），而是让
+ * pump 独立读、主循环 poll，超时即 abort —— 否则会被心跳间隔拖住。
+ */
+async function collectEnvelopes(
+  baseUrl: string,
+  pathStr: string,
+  until: (envs: Env[]) => boolean,
+  timeoutMs = 2000,
+): Promise<Env[]> {
+  const ac = new AbortController();
+  const res = await fetch(`${baseUrl}${pathStr}`, { signal: ac.signal });
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  const envs: Env[] = [];
+  let buf = "";
+  const pump = (async () => {
+    for (;;) {
+      const { done, value } = await reader.read().catch(() => ({ done: true, value: undefined }));
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const { frames, rest } = parseSseChunk(buf);
+      buf = rest;
+      for (const f of frames) envs.push(JSON.parse(f.data) as Env);
+    }
+  })();
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs && !until(envs))
+    await new Promise((r) => setTimeout(r, 15));
+  ac.abort();
+  await pump.catch(() => {});
+  return envs;
+}
+
+test("http SSE: Last-Event-ID 续传 —— 增量补发且不重发快照", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "anicode-http-"));
+  const { server, baseUrl } = await startHttp(
+    dir,
+    scriptedProvider([[{ role: "assistant", content: [{ type: "text", text: "续传回答" }] }]]),
+  );
+  const host = new HttpSessionHost({ baseUrl });
+  try {
+    const meta = await host.createSession({ cwd: dir, model: "scripted" });
+    // 边读边 send：一条连接实时采集本轮的可续传事件（feed linger 让缓冲在断开后仍存活）
+    const liveP = collectEnvelopes(
+      baseUrl,
+      `/sessions/${meta.id}/events`,
+      (e) => e.filter((x) => !CONTROL.has(x.type)).length >= 3,
+      2500,
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    await host.send(meta.id, "你好");
+    const first = await liveP;
+    assert.equal(first[0]!.type, "server.connected");
+    assert.equal(first[1]!.type, "session.snapshot");
+    const replayable = first.filter((e) => !CONTROL.has(e.type));
+    assert.ok(replayable.length >= 2, "应采集到多个可续传事件");
+    const cutoff = replayable[0]!.id;
+
+    // 用 cutoff 续传：server.connected 打头、其后事件补发、不回落快照、不重发 cutoff
+    const resumed = await collectEnvelopes(
+      baseUrl,
+      `/sessions/${meta.id}/events?lastEventId=${encodeURIComponent(cutoff)}`,
+      (e) => e.length >= 2,
+      1500,
+    );
+    assert.equal(resumed[0]!.type, "server.connected");
+    assert.ok(!resumed.some((e) => e.type === "session.snapshot"), "续传不应回落整份快照");
+    assert.ok(!resumed.some((e) => e.id === cutoff), "不应重发 cutoff 自身");
+    assert.ok(
+      resumed.some((e) => e.id === replayable[replayable.length - 1]!.id),
+      "cutoff 之后的事件应被补发",
+    );
+
+    // 未知 id → 回落整份快照
+    const stale = await collectEnvelopes(
+      baseUrl,
+      `/sessions/${meta.id}/events?lastEventId=evt_deadbeef`,
+      (e) => e.some((x) => x.type === "session.snapshot"),
+      1500,
+    );
+    assert.ok(
+      stale.some((e) => e.type === "session.snapshot"),
+      "未知 id 应重同步",
+    );
+  } finally {
+    host.dispose();
+    await server.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("http SSE: 全局 firehose GET /events 跨会话广播，不发快照", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "anicode-http-"));
+  const { server, baseUrl } = await startHttp(
+    dir,
+    scriptedProvider([[{ role: "assistant", content: [{ type: "text", text: "firehose 回答" }] }]]),
+  );
+  const host = new HttpSessionHost({ baseUrl });
+  try {
+    const meta = await host.createSession({ cwd: dir, model: "scripted" });
+    // 先起 firehose，再 send（firehose 只覆盖订阅期间的 live 事件）
+    const collector = collectEnvelopes(
+      baseUrl,
+      `/events`,
+      (e) => e.some((x) => x.type === "message.updated"),
+      2500,
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    await host.send(meta.id, "你好");
+    const envs = await collector;
+    assert.equal(envs[0]!.type, "server.connected");
+    assert.ok(!envs.some((e) => e.type === "session.snapshot"), "firehose 不发快照");
+    assert.ok(
+      envs.some((e) => e.type === "session.event" && e.properties.sessionId === meta.id),
+      "firehose 应带 sessionId 广播会话事件",
+    );
+    assert.ok(
+      envs.some((e) => e.type === "message.updated"),
+      "firehose 含 parts 投影",
+    );
+  } finally {
+    host.dispose();
+    await server.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("http: 目录级多实例路由 —— x-anicode-directory / ?directory= 隔离会话", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "anicode-http-"));
+  const provider = scriptedProvider([]);
+  const mk = (sub: string) =>
+    new SessionManager({
+      store: new SessionStore(path.join(dir, sub)),
+      resolveProvider: () => ({ provider, model: "scripted" }),
+    });
+  const managers = new Map([
+    ["/proj/a", mk("a")],
+    ["/proj/b", mk("b")],
+  ]);
+  const fallback = mk("default");
+  const server = new HttpDaemonServer({
+    manager: fallback,
+    resolveInstance: (d) => managers.get(d) ?? fallback,
+  });
+  await server.listen(0);
+  const baseUrl = `http://127.0.0.1:${server.port()}`;
+  try {
+    // 在实例 A 建会话（经 header）
+    const created = (await (
+      await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-anicode-directory": "/proj/a" },
+        body: JSON.stringify({ cwd: "/proj/a", model: "scripted" }),
+      })
+    ).json()) as { id: string };
+
+    // 实例 A 列表可见（经 query）
+    const listA = (await (await fetch(`${baseUrl}/sessions?directory=/proj/a`)).json()) as {
+      id: string;
+    }[];
+    assert.ok(listA.some((s) => s.id === created.id));
+
+    // 实例 B 与默认实例都看不到 A 的会话
+    const listB = (await (await fetch(`${baseUrl}/sessions?directory=/proj/b`)).json()) as {
+      id: string;
+    }[];
+    assert.ok(!listB.some((s) => s.id === created.id));
+    const listDefault = (await (await fetch(`${baseUrl}/sessions`)).json()) as { id: string }[];
+    assert.ok(!listDefault.some((s) => s.id === created.id));
+  } finally {
+    for (const m of managers.values()) m.dispose();
+    fallback.dispose();
+    await server.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

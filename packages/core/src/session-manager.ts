@@ -22,7 +22,7 @@ import type { HookRegistration } from "./hooks.js";
 import type { CompactionConfig } from "./context.js";
 import type { WebSearchBackend } from "./tools/web-search.js";
 import { LspPool, type LspServerConfig } from "./lsp.js";
-import { SessionStore, newSessionId, type SessionMeta } from "./session.js";
+import { newSessionId, type ISessionStore, type SessionMeta } from "./session.js";
 import { defaultSmallModel } from "./provider/registry.js";
 import { appendLocalAllowRules } from "./permission-store.js";
 import type {
@@ -85,10 +85,13 @@ export interface SessionSummary extends SessionMeta {
 
 export type SessionListener = (ev: SessionEvent) => void;
 
+/** firehose 监听者：收到事件所属的 sessionId 与事件本体。 */
+export type GlobalListener = (sessionId: string, ev: SessionEvent) => void;
+
 export interface SessionManagerOptions {
   /** 按 model 字符串产出 provider 实例（通常包 createProvider） */
   resolveProvider: (model: string) => AgentResolvedModel;
-  store: SessionStore;
+  store: ISessionStore;
   /** 传入即为所有会话启用工具集（默认 Agent 内置默认工具） */
   tools?: () => ToolRegistry;
   /** 每会话默认开启压缩 */
@@ -505,6 +508,8 @@ export class SessionManager {
   private opts: SessionManagerOptions;
   /** 每会话按 cwd 建的 LSP 池；进程销毁时统一关闭，避免遗留语言服务器进程。 */
   private lspPools = new Set<LspPool>();
+  /** firehose 订阅者：收所有 live 会话的事件（见 subscribeAll）。 */
+  private globalListeners = new Set<GlobalListener>();
 
   constructor(opts: SessionManagerOptions) {
     this.opts = opts;
@@ -812,6 +817,28 @@ export class SessionManager {
       return agent;
     });
     this.sessions.set(meta.id, session);
+    // 全局订阅：每个 live 会话的事件都转发给 subscribeAll 的监听者（firehose 用），
+    // 与是否有人 open 该会话无关。会话生命周期内常驻，dispose/delete 时随会话释放。
+    session.subscribe((ev) => this.fanoutGlobal(meta.id, ev));
     return session;
+  }
+
+  /**
+   * 订阅**所有**会话的事件流（firehose）。listener 收到 (sessionId, event)。
+   * 只覆盖订阅期间处于 live 的会话；冷会话被 resume/create 成 live 后自动纳入。
+   */
+  subscribeAll(listener: GlobalListener): () => void {
+    this.globalListeners.add(listener);
+    return () => this.globalListeners.delete(listener);
+  }
+
+  private fanoutGlobal(sessionId: string, ev: SessionEvent): void {
+    for (const l of this.globalListeners) {
+      try {
+        l(sessionId, ev);
+      } catch {
+        /* 单个 firehose 订阅者异常不影响其他订阅者 */
+      }
+    }
   }
 }

@@ -529,3 +529,23 @@ test("daemon: fork 复制会话历史成新会话（经 socket 往返）", async
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("daemon: socket 传输的权限 mode/profile 与 HTTP 对齐", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "anicode-daemon-"));
+  const { server, sockPath } = await startDaemon(dir, scriptedProvider([]));
+  const client = await DaemonClient.connect(sockPath);
+  try {
+    const meta = await client.createSession({ cwd: dir, model: "scripted" });
+    // 三个方法在旧 socket 客户端缺失，现应全部可用（与 HttpSessionHost 等价）。
+    assert.equal(typeof client.listPermissionProfiles, "function");
+    const profiles = await client.listPermissionProfiles!(meta.id);
+    assert.ok(profiles.readonly && profiles.full, "socket 也能列出内置档位");
+    assert.equal(await client.setPermissionProfile!(meta.id, "readonly"), "plan");
+    await client.setPermissionMode!(meta.id, "default");
+    await assert.rejects(() => client.setPermissionProfile!(meta.id, "nope"), /nope/);
+  } finally {
+    client.dispose();
+    await server.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

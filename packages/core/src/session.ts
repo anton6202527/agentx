@@ -31,6 +31,19 @@ export interface SessionData extends SessionMeta {
   messages: ChatMessage[];
 }
 
+/**
+ * 会话持久化的抽象接口 —— SessionManager 只依赖它，不绑定具体后端。
+ * 默认实现 `SessionStore`（JSONL 文件）；可选 `SqliteSessionStore`（node:sqlite）。
+ */
+export interface ISessionStore {
+  create(meta: Omit<SessionMeta, "createdAt" | "updatedAt">): Promise<SessionMeta>;
+  append(id: string, message: ChatMessage): Promise<void>;
+  rewrite(meta: SessionMeta, messages: ChatMessage[]): Promise<void>;
+  load(id: string): Promise<SessionData>;
+  list(): Promise<SessionMeta[]>;
+  delete(id: string): Promise<void>;
+}
+
 function defaultDir(): string {
   return path.join(os.homedir(), ".anicode", "sessions");
 }
@@ -44,7 +57,7 @@ export function newSessionId(now: number, rand: () => number): string {
   return `s_${ts}_${suffix}`;
 }
 
-export class SessionStore {
+export class SessionStore implements ISessionStore {
   private dir: string;
 
   constructor(dir?: string) {
@@ -194,7 +207,7 @@ export class SessionStore {
   }
 }
 
-function assertSessionId(id: string): void {
+export function assertSessionId(id: string): void {
   if (id.length === 0 || id.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) {
     throw new Error(
       t(`Invalid session id: ${JSON.stringify(id)}`, `非法会话 id: ${JSON.stringify(id)}`),

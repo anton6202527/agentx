@@ -193,3 +193,45 @@ test("sdk: 权限域 —— listProfiles/setProfile/setMode", async () => {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("sdk: event.subscribeAll —— 全局 firehose 跨会话", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "anicode-sdk-"));
+  const { server, baseUrl } = await startServer(
+    dir,
+    scriptedProvider([[{ role: "assistant", content: [{ type: "text", text: "全局回答" }] }]]),
+  );
+  const client = createAnicodeClient({ baseUrl });
+  try {
+    const meta = await client.session.create({ cwd: dir, model: "scripted" });
+    const ac = new AbortController();
+    const seen: EventEnvelope[] = [];
+    const consumer = (async () => {
+      try {
+        for await (const ev of client.event.subscribeAll({ signal: ac.signal })) {
+          seen.push(ev);
+          if (seen.some((e) => e.type === "message.updated")) ac.abort();
+        }
+      } catch {
+        /* abort 收尾 */
+      }
+    })();
+    await new Promise((r) => setTimeout(r, 50));
+    await client.session.send(meta.id, "你好");
+    await new Promise((r) => setTimeout(r, 250));
+    ac.abort();
+    await consumer;
+    assert.equal(seen[0]?.type, "server.connected");
+    assert.ok(!seen.some((e) => e.type === "session.snapshot"), "firehose 不发快照");
+    assert.ok(
+      seen.some((e) => e.type === "session.event" && e.properties.sessionId === meta.id),
+      "带 sessionId 广播",
+    );
+    assert.ok(
+      seen.some((e) => e.type === "message.updated"),
+      "含 parts 投影",
+    );
+  } finally {
+    await server.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

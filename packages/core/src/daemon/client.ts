@@ -14,6 +14,7 @@ import type {
   SessionSummary,
 } from "../session-manager.js";
 import type { SessionHost, OpenHandle, PermissionDecisionKind } from "../host.js";
+import type { PermissionMode, PermissionProfile } from "../permission.js";
 import {
   decodeLines,
   encodeFrame,
@@ -336,6 +337,18 @@ export class DaemonClient implements SessionHost {
     decision: PermissionDecisionKind,
   ): Promise<boolean> {
     return this.request((id) => ({ id, method: "answerPermission", sessionId, permId, decision }));
+  }
+
+  async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<void> {
+    await this.request((id) => ({ id, method: "setPermissionMode", sessionId, mode }));
+  }
+
+  setPermissionProfile(sessionId: string, name: string): Promise<PermissionMode> {
+    return this.request((id) => ({ id, method: "setPermissionProfile", sessionId, name }));
+  }
+
+  listPermissionProfiles(sessionId: string): Promise<Record<string, PermissionProfile>> {
+    return this.request((id) => ({ id, method: "listPermissionProfiles", sessionId }));
   }
 
   dispose(): void {

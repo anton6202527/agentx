@@ -48,7 +48,7 @@ import {
 import { gatherEnv } from "./env.js";
 import { gatherRepoMap, type RepoMapOptions } from "./repomap.js";
 import { SnapshotStore } from "./snapshot.js";
-import type { SessionStore, SessionMeta } from "./session.js";
+import type { ISessionStore, SessionMeta } from "./session.js";
 
 // ---------- 对外事件 ----------
 
@@ -186,7 +186,7 @@ export interface AgentOptions {
 }
 
 export interface PersistenceConfig {
-  store: SessionStore;
+  store: ISessionStore;
   /** 会话 meta（含 id）。resume 时传已有会话的 meta。 */
   meta: SessionMeta;
   /** resume：预填历史（跳过再次写 meta，只在此后 append） */
