@@ -127,9 +127,7 @@ test("subagent: disallowedTools 从继承集/显式集剔除（支持 glob）", 
     model: "m",
     cwd: "/x",
     tools: registry,
-    definitions: [
-      { name: "limited", description: "受限", disallowedTools: ["bash", "mcp__*"] },
-    ],
+    definitions: [{ name: "limited", description: "受限", disallowedTools: ["bash", "mcp__*"] }],
   });
   const signal = new AbortController().signal;
   await tool.run(

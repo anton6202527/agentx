@@ -2,19 +2,15 @@
  * HTTP + SSE 传输 —— server-first 路线（对齐 opencode）：SessionManager 之上的
  * 另一层薄转发，与 unix socket daemon 并存、可同时开。
  *
- * 端点（JSON）：
- *   GET  /healthz                                → { ok: true }
- *   GET  /sessions                               → SessionSummary[]
- *   POST /sessions            {cwd,model,title?} → SessionSummary
- *   GET  /sessions/:id/events                    → SSE：先推 `snapshot`，随后每个
- *                                                  会话事件一条 `session` event
- *   POST /sessions/:id/send   {text,model?}      → 204（drive 收尾后返回）
- *   POST /sessions/:id/interrupt                 → 204
- *   POST /sessions/:id/undo   {checkpointId?}    → { restored, deleted }
- *   POST /sessions/:id/permission {permId,decision} → { answered }
- *   POST /sessions/:id/permission-mode {mode}    → 204
- *   POST /sessions/:id/permission-profile {name} → { mode }
- *   GET  /sessions/:id/permission-profiles       → Record<name, PermissionProfile>
+ * 端点以 `api.ts` 的 ROUTES 表为准（单一事实源），`GET /doc` 输出 OpenAPI 3.1。
+ *
+ * SSE 统一信封 `{ id, type, properties }`（见 api.ts EVENTS 目录）：
+ *   首帧 server.connected → session.snapshot → 实时事件。其中：
+ *   - `session.event` 原样透传 SessionEvent（host 客户端兼容通道）
+ *   - `message.updated` / `message.part.updated` / `message.part.delta` 是
+ *     Message+Parts 投影（每会话一个共享 PartsProjector，多个订阅端看到同一批
+ *     part id），供 SDK/外部客户端做 UI 无关渲染
+ *   - permission.asked/replied、session.status/updated/reverted 为命名细粒度事件
  *
  * 安全：默认只应绑定 127.0.0.1；可选 token —— 提供时所有请求须带
  * `Authorization: Bearer <token>`（SSE 亦可用 `?token=` 查询参数，便于 EventSource）。
@@ -25,6 +21,9 @@ import { t } from "../i18n.js";
 import { SessionManager, type SessionEvent } from "../session-manager.js";
 import type { PermissionDecisionKind } from "../host.js";
 import type { PermissionMode } from "../permission.js";
+import { PartsProjector, messagesToParts } from "../parts.js";
+import { createId } from "../id.js";
+import { generateOpenApi, PROTOCOL_VERSION, type EventEnvelope } from "./api.js";
 
 export interface HttpDaemonOptions {
   manager: SessionManager;
@@ -66,9 +65,22 @@ function noContent(res: http.ServerResponse): void {
   res.end();
 }
 
-/** SSE 帧：JSON 无裸换行，单 data 行即可。 */
-function sseWrite(res: http.ServerResponse, event: string, data: unknown): void {
-  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+function envelope(type: string, properties: Record<string, unknown>): EventEnvelope {
+  return { id: createId("evt"), type, properties };
+}
+
+/** SSE 帧：信封 JSON 单 data 行（JSON.stringify 无裸换行）。 */
+function sseWrite(res: http.ServerResponse, ev: EventEnvelope): void {
+  res.write(`data: ${JSON.stringify(ev)}\n\n`);
+}
+
+/**
+ * 每会话一份共享的事件扇出：单一 manager 订阅 + 单一 PartsProjector，
+ * 广播给全部 SSE 连接（保证 part id 跨订阅端一致、投影恰好处理一次）。
+ */
+interface SessionFeed {
+  close: () => void;
+  writers: Set<(ev: EventEnvelope) => void>;
 }
 
 export class HttpDaemonServer {
@@ -77,6 +89,7 @@ export class HttpDaemonServer {
   private token?: string;
   /** 活跃 SSE 连接的清理器，close 时逐个断开。 */
   private sseCleanups = new Set<() => void>();
+  private feeds = new Map<string, SessionFeed>();
 
   constructor(opts: HttpDaemonOptions) {
     this.manager = opts.manager;
@@ -122,9 +135,13 @@ export class HttpDaemonServer {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (!this.authorized(req, url)) return json(res, 401, { error: "unauthorized" });
 
-    if (req.method === "GET" && url.pathname === "/healthz") return json(res, 200, { ok: true });
-    if (req.method === "GET" && url.pathname === "/sessions")
-      return json(res, 200, await this.manager.listSessions());
+    if (req.method === "GET") {
+      if (url.pathname === "/healthz") return json(res, 200, { ok: true });
+      if (url.pathname === "/global/health")
+        return json(res, 200, { ok: true, name: "anicode", protocol: PROTOCOL_VERSION });
+      if (url.pathname === "/doc") return json(res, 200, generateOpenApi());
+      if (url.pathname === "/sessions") return json(res, 200, await this.manager.listSessions());
+    }
     if (req.method === "POST" && url.pathname === "/sessions") {
       const body = JSON.parse((await readBody(req)) || "{}") as {
         cwd?: string;
@@ -140,14 +157,43 @@ export class HttpDaemonServer {
       return json(res, 200, meta);
     }
 
+    // /sessions/:id —— 会话资源本体
+    const mSelf = /^\/sessions\/([^/]+)$/.exec(url.pathname);
+    if (mSelf) {
+      const sessionId = decodeURIComponent(mSelf[1]!);
+      if (req.method === "GET") {
+        const snap = await this.snapshotOf(sessionId);
+        return snap ? json(res, 200, snap) : json(res, 404, { error: "not found" });
+      }
+      if (req.method === "DELETE") {
+        await this.manager.deleteSession(sessionId);
+        return noContent(res);
+      }
+      if (req.method === "PATCH") {
+        const body = JSON.parse((await readBody(req)) || "{}") as { title?: string };
+        if (!body.title) return json(res, 400, { error: "title is required" });
+        await this.manager.setTitle(sessionId, body.title);
+        return noContent(res);
+      }
+      return json(res, 405, { error: "method not allowed" });
+    }
+
     const m = /^\/sessions\/([^/]+)\/([a-z-]+)$/.exec(url.pathname);
     if (!m) return json(res, 404, { error: "not found" });
     const sessionId = decodeURIComponent(m[1]!);
     const action = m[2]!;
 
-    if (req.method === "GET" && action === "events") return this.sse(sessionId, res);
-    if (req.method === "GET" && action === "permission-profiles")
-      return json(res, 200, await this.manager.listPermissionProfiles(sessionId));
+    if (req.method === "GET") {
+      if (action === "events") return this.sse(sessionId, res);
+      if (action === "messages") {
+        const snap = await this.snapshotOf(sessionId);
+        if (!snap) return json(res, 404, { error: "not found" });
+        return json(res, 200, messagesToParts(sessionId, snap.messages));
+      }
+      if (action === "checkpoints") return json(res, 200, this.manager.listCheckpoints(sessionId));
+      if (action === "permission-profiles")
+        return json(res, 200, await this.manager.listPermissionProfiles(sessionId));
+    }
 
     if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
     const body = JSON.parse((await readBody(req)) || "{}") as Record<string, unknown>;
@@ -204,10 +250,87 @@ export class HttpDaemonServer {
     }
   }
 
-  /** 订阅会话：snapshot 先行，之后事件实时推送；连接断开即退订。 */
+  /** live 快照；未加载则经 resumeSession 懒载入（不存在返回 undefined）。 */
+  private async snapshotOf(sessionId: string) {
+    const live = this.manager.peek(sessionId);
+    if (live) return live;
+    try {
+      await this.manager.resumeSession(sessionId);
+    } catch {
+      return undefined;
+    }
+    return this.manager.peek(sessionId);
+  }
+
+  /** 取（或建）会话的共享事件扇出。 */
+  private async feed(sessionId: string): Promise<SessionFeed> {
+    const existing = this.feeds.get(sessionId);
+    if (existing) return existing;
+    const writers = new Set<(ev: EventEnvelope) => void>();
+    const projector = new PartsProjector(sessionId);
+    const broadcast = (ev: EventEnvelope) => {
+      for (const w of writers) w(ev);
+    };
+    const handle = await this.manager.open(sessionId, (event: SessionEvent) => {
+      broadcast(envelope("session.event", { sessionId, event }));
+      for (const named of this.namedEvents(sessionId, projector, event)) broadcast(named);
+    });
+    const feed: SessionFeed = {
+      writers,
+      close: () => {
+        handle.close();
+        this.feeds.delete(sessionId);
+      },
+    };
+    this.feeds.set(sessionId, feed);
+    return feed;
+  }
+
+  /** SessionEvent → 命名细粒度事件（含 Message+Parts 投影）。 */
+  private namedEvents(
+    sessionId: string,
+    projector: PartsProjector,
+    event: SessionEvent,
+  ): EventEnvelope[] {
+    switch (event.type) {
+      case "agent":
+        return projector
+          .handle(event.event)
+          .map((p) => envelope(p.type, p.properties as unknown as Record<string, unknown>));
+      case "permission_request":
+        return [
+          envelope("permission.asked", {
+            sessionId,
+            permId: event.permId,
+            toolName: event.toolName,
+            ruleKey: event.ruleKey,
+          }),
+        ];
+      case "permission_resolved":
+        return [
+          envelope("permission.replied", {
+            sessionId,
+            permId: event.permId,
+            decision: event.decision,
+          }),
+        ];
+      case "title":
+        return [envelope("session.updated", { sessionId, title: event.title })];
+      case "state":
+        return [envelope("session.status", { sessionId, running: event.running })];
+      case "reverted": {
+        const { type: _type, ...rest } = event;
+        return [envelope("session.reverted", { sessionId, ...rest })];
+      }
+      default:
+        return [];
+    }
+  }
+
+  /** 订阅会话：server.connected → session.snapshot 先行，之后实时事件；断开即退订。 */
   private async sse(sessionId: string, res: http.ServerResponse): Promise<void> {
-    const listener = (event: SessionEvent) => sseWrite(res, "session", event);
-    const handle = await this.manager.open(sessionId, listener);
+    const feed = await this.feed(sessionId);
+    const snapshot = this.manager.peek(sessionId);
     res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
@@ -215,12 +338,16 @@ export class HttpDaemonServer {
       "x-accel-buffering": "no",
     });
     res.write("retry: 1000\n\n");
-    sseWrite(res, "snapshot", handle.snapshot);
-    // 心跳注释行防中间层空闲超时断连。
-    const heartbeat = setInterval(() => res.write(": ping\n\n"), 30_000);
+    sseWrite(res, envelope("server.connected", { protocol: PROTOCOL_VERSION }));
+    sseWrite(res, envelope("session.snapshot", { sessionId, snapshot }));
+
+    const writer = (ev: EventEnvelope) => sseWrite(res, ev);
+    feed.writers.add(writer);
+    const heartbeat = setInterval(() => sseWrite(res, envelope("server.heartbeat", {})), 30_000);
     const cleanup = () => {
       clearInterval(heartbeat);
-      handle.close();
+      feed.writers.delete(writer);
+      if (feed.writers.size === 0) feed.close();
       this.sseCleanups.delete(cleanup);
       res.end();
     };

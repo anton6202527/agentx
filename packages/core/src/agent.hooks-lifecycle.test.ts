@@ -163,8 +163,14 @@ test("PreCompact / PostCompact: 压缩触发前后各响一次", async () => {
       /* drain */
     }
   }
-  assert.ok(fired.some((f) => f.startsWith("pre:")), `PreCompact 未触发: ${fired.join(",")}`);
-  assert.ok(fired.some((f) => f.startsWith("post:")), `PostCompact 未触发: ${fired.join(",")}`);
+  assert.ok(
+    fired.some((f) => f.startsWith("pre:")),
+    `PreCompact 未触发: ${fired.join(",")}`,
+  );
+  assert.ok(
+    fired.some((f) => f.startsWith("post:")),
+    `PostCompact 未触发: ${fired.join(",")}`,
+  );
 });
 
 test("SubagentStart: block 阻止派生；SubagentStop 观察结果", async () => {

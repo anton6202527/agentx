@@ -408,7 +408,12 @@ export function buildModelPickerOverlay(
     0,
     content.findIndex((entry) => entry.modelIndex === index),
   );
-  const win = scrollWindow(content, selectedLine, viewportHeight, () => ({ rendered: blank() }));
+  const win = scrollWindow<{ rendered: string; modelIndex?: number }>(
+    content,
+    selectedLine,
+    viewportHeight,
+    () => ({ rendered: blank() }),
+  );
   L.push(...win.map((entry) => entry.rendered));
   L.push(blank());
   return {

@@ -148,3 +148,132 @@ test("http host: undo 无快照时报错经 HTTP 透传", async () => {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("http REST: 资源模型 —— GET/PATCH/DELETE /sessions/:id、messages、checkpoints、doc、health", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "anicode-http-"));
+  const { server, baseUrl } = await startHttp(
+    dir,
+    scriptedProvider([[{ role: "assistant", content: [{ type: "text", text: "投影回答" }] }]]),
+  );
+  const host = new HttpSessionHost({ baseUrl });
+  try {
+    const health = (await (await fetch(`${baseUrl}/global/health`)).json()) as {
+      ok: boolean;
+      protocol: number;
+    };
+    assert.equal(health.ok, true);
+    assert.ok(health.protocol >= 1);
+
+    const doc = (await (await fetch(`${baseUrl}/doc`)).json()) as {
+      openapi: string;
+      paths: Record<string, unknown>;
+    };
+    assert.equal(doc.openapi, "3.1.0");
+    assert.ok(doc.paths["/sessions/{id}/messages"]);
+
+    const meta = await host.createSession({ cwd: dir, model: "scripted" });
+    await host.send(meta.id, "你好");
+
+    // GET /sessions/:id → 快照
+    const snap = (await (await fetch(`${baseUrl}/sessions/${meta.id}`)).json()) as {
+      meta: { id: string };
+      messages: unknown[];
+      running: boolean;
+    };
+    assert.equal(snap.meta.id, meta.id);
+    assert.ok(snap.messages.length >= 2);
+
+    // GET /sessions/:id/messages → Message+Parts 投影
+    const messages = (await (await fetch(`${baseUrl}/sessions/${meta.id}/messages`)).json()) as {
+      info: { role: string };
+      parts: { type: string; text?: string }[];
+    }[];
+    assert.equal(messages.length, 2);
+    assert.equal(messages[0]!.info.role, "user");
+    assert.equal(messages[1]!.info.role, "assistant");
+    assert.ok(messages[1]!.parts.some((p) => p.type === "text" && p.text === "投影回答"));
+
+    // PATCH 标题
+    const patch = await fetch(`${baseUrl}/sessions/${meta.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "新标题" }),
+    });
+    assert.equal(patch.status, 204);
+    assert.equal((await host.listSessions()).find((s) => s.id === meta.id)?.title, "新标题");
+
+    // checkpoints（未开启快照 → 空数组而非报错）
+    const cps = (await (
+      await fetch(`${baseUrl}/sessions/${meta.id}/checkpoints`)
+    ).json()) as unknown[];
+    assert.deepEqual(cps, []);
+
+    // DELETE → 列表消失，GET 404
+    const del = await fetch(`${baseUrl}/sessions/${meta.id}`, { method: "DELETE" });
+    assert.equal(del.status, 204);
+    assert.ok(!(await host.listSessions()).some((s) => s.id === meta.id));
+    assert.equal((await fetch(`${baseUrl}/sessions/${meta.id}`)).status, 404);
+  } finally {
+    host.dispose();
+    await server.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("http SSE: 信封协议 —— server.connected 首帧、snapshot 次帧、parts 投影事件广播", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "anicode-http-"));
+  const { server, baseUrl } = await startHttp(
+    dir,
+    scriptedProvider([[{ role: "assistant", content: [{ type: "text", text: "信封回答" }] }]]),
+  );
+  const host = new HttpSessionHost({ baseUrl });
+  try {
+    const meta = await host.createSession({ cwd: dir, model: "scripted" });
+    const ac = new AbortController();
+    const res = await fetch(`${baseUrl}/sessions/${meta.id}/events`, { signal: ac.signal });
+    assert.ok(res.body);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    const envelopes: { id: string; type: string; properties: Record<string, unknown> }[] = [];
+    let buf = "";
+    const pump = (async () => {
+      for (;;) {
+        const { done, value } = await reader.read().catch(() => ({ done: true, value: undefined }));
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const { frames, rest } = parseSseChunk(buf);
+        buf = rest;
+        for (const f of frames) envelopes.push(JSON.parse(f.data) as (typeof envelopes)[number]);
+      }
+    })();
+
+    // 等首两帧
+    for (let i = 0; i < 50 && envelopes.length < 2; i++)
+      await new Promise((r) => setTimeout(r, 20));
+    assert.equal(envelopes[0]?.type, "server.connected");
+    assert.equal(envelopes[1]?.type, "session.snapshot");
+    assert.ok(envelopes.every((e) => /^evt_/.test(e.id)));
+
+    await host.send(meta.id, "你好");
+    await new Promise((r) => setTimeout(r, 200));
+
+    const types = envelopes.map((e) => e.type);
+    assert.ok(types.includes("session.event"), "SessionEvent 透传通道");
+    assert.ok(types.includes("session.status"), "命名运行态事件");
+    assert.ok(types.includes("message.updated"), "消息投影");
+    const deltas = envelopes.filter((e) => e.type === "message.part.delta");
+    assert.ok(
+      deltas.some((e) => (e.properties as { delta?: string }).delta?.includes("信封回答")),
+      "part 级文本增量",
+    );
+    const partUpdates = envelopes.filter((e) => e.type === "message.part.updated");
+    assert.ok(partUpdates.length > 0, "part 终态事件");
+
+    ac.abort();
+    await pump;
+  } finally {
+    host.dispose();
+    await server.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

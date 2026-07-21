@@ -407,7 +407,9 @@ class ManagedSession {
       throw new Error(t(`Snapshot ${checkpointId} not found`, `未找到快照 ${checkpointId}`));
     const target = this.checkpoints[idx]!;
     const res =
-      mode === "conversation" ? { restored: 0, deleted: 0 } : await store.restore({ tree: target.tree });
+      mode === "conversation"
+        ? { restored: 0, deleted: 0 }
+        : await store.restore({ tree: target.tree });
     const removedMessages =
       mode === "files" ? 0 : await this.agent.rewindConversation(target.messageCount);
     this.checkpoints.splice(idx); // 丢弃目标及其之后的快照
@@ -563,8 +565,7 @@ export class SessionManager {
       opts?.upToMessage !== undefined ? snap.messages.slice(0, opts.upToMessage) : snap.messages;
     const resolved = this.opts.resolveProvider(snap.meta.model);
     const id = newSessionId((this.opts.now ?? Date.now)(), this.opts.rand ?? Math.random);
-    const title =
-      opts?.title ?? (snap.meta.title ? `${snap.meta.title} (fork)` : undefined);
+    const title = opts?.title ?? (snap.meta.title ? `${snap.meta.title} (fork)` : undefined);
     const meta = await this.opts.store.create({
       id,
       cwd: snap.meta.cwd,
@@ -786,7 +787,11 @@ export class SessionManager {
           confirm,
           // allow_always 写回会话 cwd 的项目本地设置（.anicode/settings.local.json）
           ...(this.opts.persistPermissions
-            ? { persistAllowRule: (rule: string) => appendLocalAllowRules(meta.cwd, [rule]) }
+            ? {
+                persistAllowRule: async (rule: string) => {
+                  await appendLocalAllowRules(meta.cwd, [rule]);
+                },
+              }
             : {}),
         },
         ...(this.opts.permissionProfiles

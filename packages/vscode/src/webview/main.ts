@@ -352,7 +352,12 @@ function renderPermission(p: PendingPerm, extra: number): HTMLElement {
   actions.append(
     permButton(t("Allow", "允许"), "allow", p.permId, "allow"),
     permButton(t("Allow and remember", "允许并记住"), "remember", p.permId, "allow_remember"),
-    permButton(t("Always allow (persist)", "永久允许（写入项目）"), "remember", p.permId, "allow_always"),
+    permButton(
+      t("Always allow (persist)", "永久允许（写入项目）"),
+      "remember",
+      p.permId,
+      "allow_always",
+    ),
     permButton(t("Deny", "拒绝"), "deny", p.permId, "deny"),
   );
   card.append(title, key, actions);

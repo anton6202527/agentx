@@ -100,6 +100,7 @@ export {
   type SessionListener,
   type Checkpoint,
   type RewindMode,
+  type PermissionAnswer,
 } from "./session-manager.js";
 export { SnapshotStore, type Snapshot, type RestoreResult } from "./snapshot.js";
 export {
@@ -225,3 +226,22 @@ export {
   buildSeatbeltProfile,
   resolveSandboxPolicy,
 } from "./tools/index.js";
+export { createId, deterministicId, type IdPrefix } from "./id.js";
+export {
+  messagesToParts,
+  PartsProjector,
+  type PartsProjectorOptions,
+  type MessageInfo,
+  type UserMessageInfo,
+  type AssistantMessageInfo,
+  type MessageWithParts,
+  type MessagePart,
+  type MessageTextPart,
+  type MessageReasoningPart,
+  type MessageFilePart,
+  type MessageStepStartPart,
+  type MessageStepFinishPart,
+  type MessageToolPart,
+  type ToolPartState,
+  type ProjectedEvent,
+} from "./parts.js";

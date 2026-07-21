@@ -269,10 +269,7 @@ function builtinCommands(): CommandMenuRow[] {
     },
     {
       name: "mcp",
-      description: t(
-        "Show MCP servers, resources and prompts",
-        "查看 MCP 服务器、资源与提示模板",
-      ),
+      description: t("Show MCP servers, resources and prompts", "查看 MCP 服务器、资源与提示模板"),
     },
     {
       name: "lang",
@@ -847,8 +844,7 @@ export function App({
         // 参数：可选 mode（files/conversation/both）与可选 checkpoint id，顺序任意。
         const MODES = ["files", "conversation", "both"] as const;
         const modeArg = rest.find((a) => (MODES as readonly string[]).includes(a)) as
-          | (typeof MODES)[number]
-          | undefined;
+          (typeof MODES)[number] | undefined;
         const ckptArg = rest.find((a) => !(MODES as readonly string[]).includes(a));
         // 成功提示由广播的 reverted 事件统一渲染（所有订阅者一致）；这里只兜错误。
         try {
@@ -884,10 +880,7 @@ export function App({
             t: "push",
             item: {
               kind: "info",
-              text: t(
-                `⑂ Forked to new session ${meta.id}`,
-                `⑂ 已分叉到新会话 ${meta.id}`,
-              ),
+              text: t(`⑂ Forked to new session ${meta.id}`, `⑂ 已分叉到新会话 ${meta.id}`),
             },
           });
         } catch (err) {
@@ -1077,7 +1070,10 @@ export function App({
             t: "push",
             item: {
               kind: "error",
-              text: t(`MCP query failed: ${errorMessage(err)}`, `MCP 查询失败：${errorMessage(err)}`),
+              text: t(
+                `MCP query failed: ${errorMessage(err)}`,
+                `MCP 查询失败：${errorMessage(err)}`,
+              ),
             },
           });
         }
@@ -1634,8 +1630,7 @@ export function App({
   // 底部状态栏（窄屏下逐段让位，避免折行把整屏布局顶掉）。
   const fullBrand = `${APP_NAME} v${version}`;
   const cwdLabel = tildify(state.meta.cwd);
-  const brand =
-    dispWidth(cwdLabel) + dispWidth(fullBrand) + 1 <= termCols ? fullBrand : APP_NAME;
+  const brand = dispWidth(cwdLabel) + dispWidth(fullBrand) + 1 <= termCols ? fullBrand : APP_NAME;
   // 成本估算跟在 token 后展示（对齐 Claude Code /usage 的美元维度）；无价格信息时省略。
   const costPart =
     state.costUSD !== undefined && state.costUSD > 0 ? ` · $${state.costUSD.toFixed(4)}` : "";

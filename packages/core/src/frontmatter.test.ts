@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { parseFrontmatter, stripFrontmatter, fmString, fmStringList } from "./frontmatter.js";
 
 test("单行标量与引号", () => {
-  const fm = parseFrontmatter(`---\nname: my-skill\ndescription: "带引号, 含逗号"\nmodel: 'sonnet'\n---\nbody`);
+  const fm = parseFrontmatter(
+    `---\nname: my-skill\ndescription: "带引号, 含逗号"\nmodel: 'sonnet'\n---\nbody`,
+  );
   assert.equal(fm["name"], "my-skill");
   assert.equal(fm["description"], "带引号, 含逗号");
   assert.equal(fm["model"], "sonnet");
@@ -25,7 +27,7 @@ test("块标量 |- 变体与更深缩进保留", () => {
 
 test("行内列表与块列表", () => {
   const fm = parseFrontmatter(
-    ["tools: [read, bash, \"a, b\"]", "allowed-tools:", "  - edit", "  - grep"].join("\n"),
+    ['tools: [read, bash, "a, b"]', "allowed-tools:", "  - edit", "  - grep"].join("\n"),
   );
   assert.deepEqual(fm["tools"], ["read", "bash", "a, b"]);
   assert.deepEqual(fm["allowed-tools"], ["edit", "grep"]);

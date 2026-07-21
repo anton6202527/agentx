@@ -230,7 +230,10 @@ function applyEvent(dispatch: React.Dispatch<Action>, se: SessionEvent): void {
 
 export interface SessionController {
   state: ChatState;
-  answerPermission: (permId: string, decision: "allow" | "allow_remember" | "allow_always" | "deny") => void;
+  answerPermission: (
+    permId: string,
+    decision: "allow" | "allow_remember" | "allow_always" | "deny",
+  ) => void;
 }
 
 export function useSession(sessionId: string | null): SessionController {
@@ -299,7 +302,10 @@ export function useSession(sessionId: string | null): SessionController {
     };
   }, [sessionId]);
 
-  const answerPermission = (permId: string, decision: "allow" | "allow_remember" | "allow_always" | "deny") => {
+  const answerPermission = (
+    permId: string,
+    decision: "allow" | "allow_remember" | "allow_always" | "deny",
+  ) => {
     const id = sessionRef.current;
     if (!id) return;
     dispatch({ t: "permRemove", permId });

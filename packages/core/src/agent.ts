@@ -550,9 +550,7 @@ export class Agent {
         t("Session is running; interrupt it before compacting", "会话运行中，请先中断再压缩"),
       );
     if (!this.compaction)
-      throw new Error(
-        t("Compaction is not enabled for this session", "该会话未启用上下文压缩"),
-      );
+      throw new Error(t("Compaction is not enabled for this session", "该会话未启用上下文压缩"));
     if (this.hooks.has("PreCompact")) {
       await this.hooks.run({ event: "PreCompact", cwd: this.cwd, tokens: this.lastInputTokens });
     }
@@ -770,7 +768,11 @@ export class Agent {
           this.hooks.has("PreCompact") &&
           compactionPending(this.history, this.compaction, this.lastInputTokens)
         ) {
-          await this.hooks.run({ event: "PreCompact", cwd: this.cwd, tokens: this.lastInputTokens });
+          await this.hooks.run({
+            event: "PreCompact",
+            cwd: this.cwd,
+            tokens: this.lastInputTokens,
+          });
         }
         const res = await maybeCompact(this.history, this.compaction, this.lastInputTokens);
         if (res.compacted) {

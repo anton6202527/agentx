@@ -188,14 +188,9 @@ test("apply_patch: patch 内依赖——先 Add 再 Update 同一文件按序生
 });
 
 test("@@ 上下文消歧：相同代码块出现两处时改中 @@ 指定的那处", () => {
-  const content = [
-    "function a() {",
-    "  return 1;",
-    "}",
-    "function b() {",
-    "  return 1;",
-    "}",
-  ].join("\n");
+  const content = ["function a() {", "  return 1;", "}", "function b() {", "  return 1;", "}"].join(
+    "\n",
+  );
   const ops = parsePatch(
     [
       "*** Begin Patch",

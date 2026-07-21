@@ -347,6 +347,9 @@ test("write_stdin / list_shells 工具：走共享注册表", async () => {
     return seen.includes("ping");
   });
   shells.kill(id);
-  await assert.rejects(() => writeStdinTool.run({ shell_id: "bash_none", input: "x" }, c), /未知|Unknown/);
+  await assert.rejects(
+    () => writeStdinTool.run({ shell_id: "bash_none", input: "x" }, c),
+    /未知|Unknown/,
+  );
   await fs.rm(dir, { recursive: true, force: true });
 });

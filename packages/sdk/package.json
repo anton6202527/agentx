@@ -1,0 +1,17 @@
+{
+  "name": "@anicode/sdk",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "AniCode server 的类型化客户端 SDK：REST + SSE 事件订阅（零运行时依赖，类型自 @anicode/core type-only 导入）",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "ANICODE_LANG=zh node --import tsx --test 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anicode/core": "*"
+  }
+}

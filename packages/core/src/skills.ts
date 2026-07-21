@@ -136,4 +136,3 @@ export function createSkillTool(skills: SkillMeta[]): Tool {
     },
   };
 }
-

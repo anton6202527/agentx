@@ -3,6 +3,9 @@
  * 与 LocalSessionHost / DaemonClient（socket）等价可换。
  *
  * 事件用 SSE（fetch 流式解析，零依赖）；请求用 fetch JSON。
+ * SSE 帧为统一信封 `{id,type,properties}`（见 daemon/api.ts）：host 客户端只消费
+ * `session.snapshot`（首个快照）与 `session.event`（SessionEvent 透传通道），
+ * 其余命名事件（message.part.* 等）面向 SDK/外部客户端，此处忽略。
  * 相比 socket 版额外支持 setPermissionMode / setPermissionProfile（HTTP 端点已就绪）。
  */
 
@@ -128,12 +131,17 @@ export class HttpSessionHost implements SessionHost {
           const { frames, rest } = parseSseChunk(buffer);
           buffer = rest;
           for (const frame of frames) {
-            if (frame.event === "snapshot") {
+            const env = JSON.parse(frame.data) as {
+              type: string;
+              properties: Record<string, unknown>;
+            };
+            if (env.type === "session.snapshot") {
               gotSnapshot = true;
-              snapshotResolve(JSON.parse(frame.data) as SessionSnapshot);
-            } else if (frame.event === "session") {
-              listener(JSON.parse(frame.data) as SessionEvent);
+              snapshotResolve(env.properties.snapshot as SessionSnapshot);
+            } else if (env.type === "session.event") {
+              listener(env.properties.event as SessionEvent);
             }
+            // 其余命名事件（server.*/message.*/permission.*）面向 SDK，host 层忽略。
           }
         }
         if (!gotSnapshot)

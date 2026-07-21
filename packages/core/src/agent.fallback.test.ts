@@ -62,7 +62,10 @@ test("fallback: 主模型重试耗尽后切换到降级模型完成本轮", asyn
   assert.equal(fb.to, "backup-model");
   assert.equal(primaryCalls.count, 2, "主模型应尝试 1+1 次");
   assert.equal(backupCalls.count, 1);
-  assert.ok(events.some((e) => e.type === "done"), "降级后应正常完成");
+  assert.ok(
+    events.some((e) => e.type === "done"),
+    "降级后应正常完成",
+  );
   assert.ok(!events.some((e) => e.type === "error"));
 
   // 下一次 drive 回到主模型（降级是 drive 局部的），链重置后仍可再次降级。
@@ -112,12 +115,22 @@ test("fallback: 解析失败的候选被跳过，用下一个", async () => {
 });
 
 test("成本估算：estimateCostUSD 与 Agent.estimatedCostUSD", async () => {
-  const usage = { inputTokens: 1_000_000, outputTokens: 100_000, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  const usage = {
+    inputTokens: 1_000_000,
+    outputTokens: 100_000,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  };
   // $5/MTok input + $25/MTok output → 5 + 2.5
   assert.equal(estimateCostUSD(usage, { input: 5, output: 25 }), 7.5);
   assert.equal(estimateCostUSD(usage, undefined), undefined);
   // cache 默认价：读 0.1×input、写 1.25×input
-  const cacheUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 1_000_000, cacheWriteTokens: 1_000_000 };
+  const cacheUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 1_000_000,
+    cacheWriteTokens: 1_000_000,
+  };
   assert.equal(estimateCostUSD(cacheUsage, { input: 4, output: 20 }), 4 * 0.1 + 4 * 1.25);
 
   const agent = new Agent({

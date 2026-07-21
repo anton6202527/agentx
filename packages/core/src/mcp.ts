@@ -169,7 +169,10 @@ export class McpClient {
       .map((c) =>
         typeof c?.text === "string"
           ? c.text
-          : t(`[binary content: ${c?.mimeType ?? "unknown"}]`, `[二进制内容: ${c?.mimeType ?? "未知类型"}]`),
+          : t(
+              `[binary content: ${c?.mimeType ?? "unknown"}]`,
+              `[二进制内容: ${c?.mimeType ?? "未知类型"}]`,
+            ),
       )
       .join("\n");
   }

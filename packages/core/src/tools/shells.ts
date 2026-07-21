@@ -229,7 +229,10 @@ export class ShellRegistry {
     if (!entry) return false;
     if (entry.status !== "running") {
       throw new ToolError(
-        t(`Shell ${id} is not running (${entry.status})`, `shell ${id} 已不在运行（${entry.status}）`),
+        t(
+          `Shell ${id} is not running (${entry.status})`,
+          `shell ${id} 已不在运行（${entry.status}）`,
+        ),
       );
     }
     const stdin = entry.child.stdin;
