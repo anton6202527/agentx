@@ -1,0 +1,1 @@
+{"root":["./src/app.regression.test.tsx","./src/app.test.tsx","./src/app.tsx","./src/cli.test.tsx","./src/cli.tsx","./src/debug-log.test.tsx","./src/debug-log.ts","./src/mentions.test.ts","./src/mentions.ts","./src/ollama.ts","./src/overlay.test.ts","./src/overlay.ts","./src/transcript.ts"],"version":"5.9.3"}

@@ -68,6 +68,31 @@ interface RawModeInput {
   setRawMode?: (enabled: boolean) => unknown;
 }
 
+interface TerminalScreenOutput {
+  isTTY?: boolean;
+  write: (chunk: string) => unknown;
+}
+
+/**
+ * 在 Ink 首帧之前进入备用屏，避免首帧先写入普通回滚缓冲而让终端整页产生滚动。
+ * 返回的清理函数会关闭鼠标跟踪、复位配色并恢复原屏幕。
+ */
+export function enterTerminalScreen(output: TerminalScreenOutput = process.stdout): () => void {
+  if (!output.isTTY) return () => {};
+  output.write("\x1b[?1049h\x1b[H");
+  output.write("\x1b]11;#0a0a0a\x07");
+  output.write("\x1b]17;#264f78\x07\x1b]19;#dcdcdc\x07");
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    output.write("\x1b[?1006l\x1b[?1000l");
+    output.write("\x1b]111\x07");
+    output.write("\x1b]117\x07\x1b]119\x07");
+    output.write("\x1b[?1049l");
+  };
+}
+
 /**
  * Ink 只在组件挂载/卸载时切 raw mode；若 IDE 任务面板、job control 或其它 TTY
  * 状态切换在运行期间把终端恢复成 canonical mode，Ink 的内部计数仍认为 raw mode
@@ -433,36 +458,6 @@ export function validateArgs(args: CliArgs): void {
   }
 }
 
-/**
- * 探测本地 Ollama：在跑就返回一个可用模型 spec（优先 deepseek），否则 null。
- * 这样 `anicode`（无 Key）在装了 Ollama 且拉过 deepseek-r1 时，默认就是真正免费开源的 DeepSeek。
- * 失败/超时/未运行一律静默返回 null（回退云端偏好或 debug/demo）。
- */
-export async function detectLocalModel(
-  fetchImpl: typeof fetch = fetch,
-  baseUrl = process.env["OLLAMA_BASE_URL"] || "http://127.0.0.1:11434/v1",
-): Promise<string | null> {
-  const host = baseUrl.replace(/\/v1\/?$/, "");
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 400);
-    let res: Response;
-    try {
-      res = await fetchImpl(`${host}/api/tags`, { signal: controller.signal });
-    } finally {
-      clearTimeout(timer);
-    }
-    if (!res.ok) return null;
-    const data = (await res.json()) as { models?: { name?: string }[] };
-    const names = (data.models ?? []).map((m) => m.name).filter((n): n is string => Boolean(n));
-    if (names.length === 0) return null;
-    const deepseek = names.find((n) => /deepseek/i.test(n));
-    return `ollama/${deepseek ?? names[0]}`;
-  } catch {
-    return null;
-  }
-}
-
 /** 本地交互入口要求云端凭证已就绪；core registry 本身仍保持可离线解析。 */
 export function assertProviderConfigured(model: string): void {
   const diagnostics = diagnoseProvider(model);
@@ -808,10 +803,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   for (const w of configWarnings)
     console.error(t(`${DISPLAY_NAME} config warning: ${w}`, `${DISPLAY_NAME} 配置告警: ${w}`));
 
-  // 未显式指定模型时挑默认：配置 model → 本地 Ollama（优先 DeepSeek）→
-  // 已配置凭证的云端（DeepSeek 优先）→ 零网络 debug/demo。绝不因缺 ANTHROPIC_API_KEY 报错退出。
+  // 未显式指定模型时挑默认：配置 model → 已配置凭证的 DeepSeek → 零网络 debug/demo。
+  // 绝不因缺 DEEPSEEK_API_KEY 报错退出。
   if (!args.modelExplicit && !args.demo) {
-    args.model = config.model ?? (await detectLocalModel()) ?? resolveDefaultModel();
+    args.model = config.model ?? resolveDefaultModel();
   }
 
   // 校验 provider（本地模式下尽早报错）。仅当用户显式选了缺 key 的模型才会抛错。
@@ -962,25 +957,30 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
     // 选定会话：--resume 用已有 ID，否则新建。订阅只由 App 负责。
     const sessionId = await selectSessionId(host, args);
-    const instance = render(
-      <App
-        host={host}
-        cwd={args.cwd}
-        model={args.model}
-        sessionId={sessionId}
-        providers={listProviderDetails()}
-        catalog={listModelCatalog()}
-        commands={commands}
-        {...(mcpStatus ? { mcpStatus } : {})}
-        inspectProviderCredentials={!args.daemon}
-        version={CLI_VERSION}
-      />,
-    );
-    const stopRawModeWatchdog = startRawModeWatchdog();
+    const restoreTerminalScreen = enterTerminalScreen();
     try {
-      await instance.waitUntilExit();
+      const instance = render(
+        <App
+          host={host}
+          cwd={args.cwd}
+          model={args.model}
+          sessionId={sessionId}
+          providers={listProviderDetails()}
+          catalog={listModelCatalog()}
+          commands={commands}
+          {...(mcpStatus ? { mcpStatus } : {})}
+          inspectProviderCredentials={!args.daemon}
+          version={CLI_VERSION}
+        />,
+      );
+      const stopRawModeWatchdog = startRawModeWatchdog();
+      try {
+        await instance.waitUntilExit();
+      } finally {
+        stopRawModeWatchdog();
+      }
     } finally {
-      stopRawModeWatchdog();
+      restoreTerminalScreen();
     }
   } finally {
     host?.dispose();

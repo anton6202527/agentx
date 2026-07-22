@@ -4,13 +4,15 @@
  * 职责：订阅当前会话的事件流并渲染；收集输入（含 /斜杠命令）；把权限请求
  * 变成 y/a/n 交互回 answerPermission。会话逻辑全在 core，App 不碰。
  *
- * 斜杠命令：/help · /status · /providers · /model <provider/model> · /sessions · /resume <id> · /new [标题] · /undo · /exit
+ * 斜杠命令：/help · /status · /providers · /skills · /model <provider/model> · /sessions · /resume <id> · /new [标题] · /undo · /exit
  */
 
+import * as os from "node:os";
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Box, Text, useApp, useInput, useStdout, type DOMElement } from "ink";
 import {
   probeLocalProviders,
+  discoverSkills,
   expandCommand,
   t,
   getLang,
@@ -26,6 +28,7 @@ import type {
   SessionHost,
   SessionMeta,
   SessionSummary,
+  SkillMeta,
   TodoItem,
   Usage,
 } from "@anicode/core";
@@ -63,6 +66,8 @@ interface State {
   items: Row[];
   /** 尚未产生 tool_result 的调用，在 Static 下方动态渲染。 */
   activeTools: Map<string, Extract<Item, { kind: "tool" }>>;
+  /** 运行中 task（子 agent）的实时活动行，键=task 调用 id；子 agent 结束即清除。 */
+  subagentActivity: Map<string, string>;
   liveText: string;
   /** 流式思考过程（thinking 增量）；正文开始后收起，不入 transcript。 */
   liveThinking: string;
@@ -97,6 +102,7 @@ type Action =
   | { t: "toolStart"; id: string; name: string; ruleKey: string }
   | { t: "toolDeny"; id: string }
   | { t: "toolFinish"; id: string; status: "ok" | "err"; detail?: string }
+  | { t: "subagentActivity"; id: string; line: string }
   | { t: "running"; v: boolean }
   | { t: "usage"; u: Usage; costUSD?: number }
   | { t: "title"; title: string }
@@ -108,6 +114,7 @@ function reducer(s: State, a: Action): State {
       return {
         items: a.items,
         activeTools: a.activeTools,
+        subagentActivity: new Map(),
         liveText: "",
         liveThinking: "",
         running: a.running,
@@ -167,7 +174,20 @@ function reducer(s: State, a: Action): State {
         status,
         ...(a.detail ? { detail: a.detail } : {}),
       };
-      return { ...s, activeTools, items: [...s.items, item] };
+      // task 结束：清除其子 agent 活动行。
+      let subagentActivity = s.subagentActivity;
+      if (subagentActivity.has(a.id)) {
+        subagentActivity = new Map(subagentActivity);
+        subagentActivity.delete(a.id);
+      }
+      return { ...s, activeTools, subagentActivity, items: [...s.items, item] };
+    }
+    case "subagentActivity": {
+      // 仅对仍在运行的 task 更新（tool_result 后 task 已从 activeTools 移除）。
+      if (!s.activeTools.has(a.id)) return s;
+      const subagentActivity = new Map(s.subagentActivity);
+      subagentActivity.set(a.id, a.line);
+      return { ...s, subagentActivity };
     }
     case "running":
       return { ...s, running: a.v };
@@ -268,6 +288,13 @@ function builtinCommands(): CommandMenuRow[] {
       ),
     },
     {
+      name: "skills",
+      description: t(
+        "List auto-detected skills and their availability",
+        "列出自动发现的技能及其可用状态",
+      ),
+    },
+    {
       name: "mcp",
       description: t("Show MCP servers, resources and prompts", "查看 MCP 服务器、资源与提示模板"),
     },
@@ -293,6 +320,18 @@ export function matchCommands(all: readonly CommandMenuRow[], text: string): Com
   const prefix = all.filter((c) => c.name.toLowerCase().startsWith(q));
   if (prefix.length > 0) return prefix;
   return all.filter((c) => c.name.toLowerCase().includes(q));
+}
+
+/** 会话选择器的本地即时筛选；标题优先，同时支持 id / model / cwd。 */
+export function filterSessionRows(
+  rows: readonly SessionSummary[],
+  filter: string,
+): SessionSummary[] {
+  const q = filter.trim().toLowerCase();
+  if (!q) return [...rows];
+  return rows.filter((row) =>
+    [row.title, row.id, row.model, row.cwd].some((value) => value?.toLowerCase().includes(q)),
+  );
 }
 // 生成中的 braille spinner 帧（对齐 opencode 的动画指示手感）。
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -429,6 +468,12 @@ interface PendingPerm {
   ruleKey: string;
 }
 
+interface SessionPickerState {
+  rows: SessionSummary[];
+  index: number;
+  filter: string;
+}
+
 export interface AppProps {
   host: SessionHost;
   cwd: string;
@@ -458,7 +503,6 @@ export function App({
   inspectProviderCredentials = false,
   commands = [],
   mcpStatus,
-  version = "0.0.1",
 }: AppProps) {
   const { exit } = useApp();
   const { rows: termRows, cols: termCols } = useTerminalSize();
@@ -466,28 +510,11 @@ export function App({
   // 浮层模式：仅当 Ink 直接驱动真实 TTY 时启用「盖屏弹框」帧合成；
   // ink-testing 用的是另一个 stdout（stdout !== process.stdout），仍走 in-tree 渲染，测试不受影响。
   const overlayMode = stdout === process.stdout && !!process.stdout.isTTY;
-  // 进入 alt-screen 占满终端，退出时还原原有回滚缓冲（仅真实 TTY；测试跳过）。
-  // 同时用 OSC 17/19 把鼠标选区配色设成 VS Code 同款（选中背景 #264f78 / 前景 #dcdcdc），
-  // 退出时 OSC 117/119 复位；iTerm2 等 xterm 兼容终端支持。选中即复制由终端负责
-  // （iTerm2 默认开启「Copy to pasteboard on selection」）。
-  useEffect(() => {
-    const out = process.stdout;
-    if (!out.isTTY) return;
-    out.write("\x1b[?1049h\x1b[H");
-    // 整屏背景对齐 opencode（近纯黑 #0a0a0a）；选区配色对齐 VS Code（#264f78/#dcdcdc）。
-    out.write("\x1b]11;#0a0a0a\x07");
-    out.write("\x1b]17;#264f78\x07\x1b]19;#dcdcdc\x07");
-    return () => {
-      out.write("\x1b[?1006l\x1b[?1000l"); // 确保退出时关闭鼠标跟踪
-      out.write("\x1b]111\x07"); // 复位背景
-      out.write("\x1b]117\x07\x1b]119\x07");
-      out.write("\x1b[?1049l");
-    };
-  }, []);
   const [sessionId, setSessionId] = useState(initialId);
   const [state, dispatch] = useReducer(reducer, {
     items: [],
     activeTools: new Map(),
+    subagentActivity: new Map(),
     liveText: "",
     liveThinking: "",
     running: false,
@@ -515,7 +542,7 @@ export function App({
   const pasteSubmitRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 权限请求队列：并行只读工具可能同时产生多个 ask（如 askRules 命中），逐个裁决
   const [pendings, setPendings] = useState<PendingPerm[]>([]);
-  const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
+  const [sessions, setSessions] = useState<SessionPickerState | null>(null);
   // /model 选择器：非空即打开，index 为高亮项，filter 为搜索词。
   const [picker, setPicker] = useState<{ rows: PickerRow[]; index: number; filter: string } | null>(
     null,
@@ -540,6 +567,9 @@ export function App({
   );
   const [menuIndex, setMenuIndex] = useState(0);
   const menuIndexRef = useRef(0);
+  // OpenCode 同款 leader：Ctrl+X 后接一键命令；状态短暂显示在输入框下方。
+  const [leaderPending, setLeaderPending] = useState(false);
+  const leaderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 计划模式：/plan 切换；只读规划，退出后执行。会话切换时回到默认。
   const [planMode, setPlanMode] = useState(false);
   // per-prompt 模型覆盖：仅下一条消息生效（/model <spec> once 或选择器里 Tab 设定）。
@@ -556,20 +586,31 @@ export function App({
     menuIndexRef.current = i;
     setMenuIndex(i);
   }, []);
-  const mouseMenuOpen =
-    !picker && !pendings[0] && !sessions && matchCommands(allCommands, input).length > 0;
-  const mousePickerOpen = Boolean(picker);
-  // 选择型弹框打开时临时启用 xterm 鼠标/滚轮跟踪与 SGR 坐标编码；关闭即恢复，
-  // 避免常驻鼠标模式影响终端正常选中文本。iTerm2、Terminal.app、VS Code Terminal 均支持。
+  // 真实 TTY 中持续接管 xterm 鼠标/滚轮事件：主结果区用滚轮回看内部历史，
+  // 弹框/菜单则用同一事件选择条目。这样终端不会滚动整块备用屏，输入区始终固定在底部。
+  // 需要选中终端文字时可按住 Shift（iTerm2、Terminal.app、VS Code Terminal 均支持）。
   useEffect(() => {
-    if (!overlayMode || (!mousePickerOpen && !mouseMenuOpen)) return;
+    if (!overlayMode) return;
     stdout.write("\x1b[?1000h\x1b[?1006h");
     return () => {
       stdout.write("\x1b[?1006l\x1b[?1000l");
     };
-  }, [mouseMenuOpen, mousePickerOpen, overlayMode, stdout]);
-  // 回看滚动偏移：0=贴底看最新，>0=向上回看的条目数。
+  }, [overlayMode, stdout]);
+  // 回看滚动偏移：0=贴底看最新，>0=结果视口向上回看的终端行数。
   const [scrollOffset, setScrollOffset] = useState(0);
+  const transcriptViewportRef = useRef<DOMElement | null>(null);
+  const transcriptContentRef = useRef<DOMElement | null>(null);
+  const maxTranscriptScroll = useCallback((): number => {
+    const viewport = transcriptViewportRef.current?.yogaNode?.getComputedHeight() ?? 0;
+    const content = transcriptContentRef.current?.yogaNode?.getComputedHeight() ?? 0;
+    return Math.max(0, content - viewport);
+  }, []);
+  const scrollTranscript = useCallback(
+    (rows: number): void => {
+      setScrollOffset((offset) => Math.max(0, Math.min(offset + rows, maxTranscriptScroll())));
+    },
+    [maxTranscriptScroll],
+  );
   const closeRef = useRef<(() => void) | null>(null);
   const flushRef = useRef<(() => void) | null>(null);
   // 流式生成指示：running 期间以 ~120ms 步进推进 spinner 帧并刷新计时。
@@ -581,6 +622,13 @@ export function App({
     const id = setInterval(() => setSpin((n) => n + 1), 120);
     return () => clearInterval(id);
   }, [state.running]);
+
+  useEffect(
+    () => () => {
+      if (leaderTimerRef.current) clearTimeout(leaderTimerRef.current);
+    },
+    [],
+  );
 
   const selectModel = useCallback(
     async (spec: string): Promise<void> => {
@@ -642,6 +690,13 @@ export function App({
     [host, state.meta.cwd],
   );
 
+  const openSessionPicker = useCallback(async (): Promise<void> => {
+    const rows = await host.listSessions();
+    const current = rows.findIndex((row) => row.id === sessionId);
+    setPicker(null);
+    setSessions({ rows, index: current >= 0 ? current : 0, filter: "" });
+  }, [host, sessionId]);
+
   useEffect(
     () => () => {
       if (pasteSubmitRef.current) clearTimeout(pasteSubmitRef.current);
@@ -690,11 +745,8 @@ export function App({
         closeRef.current = handle.close;
         const snap = handle.snapshot;
         const restored = restoreTranscript(snap.messages);
-        // 会话边界始终保留；空会话在其后加一次性 logo（放进 Static 只画一次，避免动态区重绘鬼影）。
-        const initialItems: Row[] =
-          restored.items.length === 0
-            ? [sessionBoundary(snap.meta), { kind: "logo" }]
-            : [sessionBoundary(snap.meta), ...restored.items];
+        // 会话边界始终保留在顶部；不再注入欢迎 logo。
+        const initialItems: Row[] = [sessionBoundary(snap.meta), ...restored.items];
         dispatch({
           t: "reset",
           items: initialItems,
@@ -734,7 +786,16 @@ export function App({
 
   const runSlash = useCallback(
     async (line: string): Promise<boolean> => {
-      const [cmd = "", ...rest] = line.slice(1).trim().split(/\s+/);
+      const [rawCmd = "", ...rest] = line.slice(1).trim().split(/\s+/);
+      // 兼容 OpenCode 的常用别名，同时保留 anicode 原有命令名。
+      const cmd =
+        rawCmd === "models"
+          ? "model"
+          : rawCmd === "clear"
+            ? "new"
+            : rawCmd === "continue"
+              ? "sessions"
+              : rawCmd;
       if (cmd === "exit" || cmd === "quit") {
         exit();
         return true;
@@ -764,6 +825,11 @@ export function App({
           t: "push",
           item: { kind: "info", text: providersText(providers, inspectProviderCredentials) },
         });
+        return true;
+      }
+      if (cmd === "skills") {
+        const skills = await discoverSkills(state.meta.cwd);
+        dispatch({ t: "push", item: { kind: "info", text: skillsText(skills) } });
         return true;
       }
       if (cmd === "model") {
@@ -809,20 +875,13 @@ export function App({
         return true;
       }
       if (cmd === "sessions") {
-        const list = await host.listSessions();
-        setSessions(list);
+        await openSessionPicker();
         return true;
       }
       if (cmd === "resume") {
         const id = rest[0];
         if (!id) {
-          dispatch({
-            t: "push",
-            item: {
-              kind: "error",
-              text: t("Usage: /resume <sessionId>", "用法: /resume <sessionId>"),
-            },
-          });
+          await openSessionPicker();
           return true;
         }
         setSessions(null);
@@ -1120,6 +1179,7 @@ export function App({
       catalog,
       inspectProviderCredentials,
       selectModel,
+      openSessionPicker,
       state.meta,
       state.running,
       exit,
@@ -1202,17 +1262,50 @@ export function App({
     const dialogOpen = !!(picker || pendings[0] || sessions);
     const menuRows = dialogOpen ? [] : matchCommands(allCommands, inputRef.current);
     const menuOpen = menuRows.length > 0;
+    const executeLeader = (shortcut: string): void => {
+      const command =
+        shortcut === "n"
+          ? "/new"
+          : shortcut === "l"
+            ? "/sessions"
+            : shortcut === "m"
+              ? "/model"
+              : shortcut === "s"
+                ? "/status"
+                : shortcut === "c"
+                  ? "/compact"
+                  : shortcut === "u"
+                    ? "/undo both"
+                    : null;
+      if (shortcut === "q") {
+        exit();
+        return;
+      }
+      if (command) {
+        void runSlash(command).catch((err) => {
+          dispatch({ t: "push", item: { kind: "error", text: errorMessage(err) } });
+        });
+      }
+    };
     // 回看历史：PageUp 往上翻一屏，PageDown 往下；到底部即回到跟随最新。
     if (key.pageUp) {
       if (dialogOpen || menuOpen) return;
       const page = Math.max(1, termRows - 2);
-      setScrollOffset((o) => Math.min(o + page, Math.max(0, state.items.length - 1)));
+      scrollTranscript(page);
       return;
     }
     if (key.pageDown) {
       if (dialogOpen || menuOpen) return;
       const page = Math.max(1, termRows - 2);
-      setScrollOffset((o) => Math.max(0, o - page));
+      scrollTranscript(-page);
+      return;
+    }
+    // 普通结果页的滚轮只移动内部会话视口，不交给终端滚动整块 alt-screen。
+    // 触控板可能在一个 stdin chunk 里合并多次事件，wheelDelta 已累计。
+    if (mouse !== null && !dialogOpen && !menuOpen) {
+      if (mouse.wheelDelta !== 0) {
+        scrollTranscript(-mouse.wheelDelta * 3);
+      }
       return;
     }
     if (picker) {
@@ -1308,6 +1401,79 @@ export function App({
       }
       return;
     }
+    if (sessions) {
+      const visible = filterSessionRows(sessions.rows, sessions.filter);
+      if (mouse !== null) {
+        if (mouse.wheelDelta !== 0) {
+          setSessions((current) => {
+            if (!current) return current;
+            const n = filterSessionRows(current.rows, current.filter).length;
+            if (n === 0) return current;
+            return {
+              ...current,
+              index: Math.max(0, Math.min(current.index + mouse.wheelDelta, n - 1)),
+            };
+          });
+        } else if (mouse.leftClick) {
+          const sprite = windowHorizontally(
+            buildSessionsOverlay(visible, termRows, termCols, {
+              index: sessions.index,
+              filter: sessions.filter,
+              currentId: sessionId,
+            }),
+            termCols,
+            hoffRef.current,
+          );
+          const clicked = hitTestSprite(sprite, mouse.leftClick.column, mouse.leftClick.row);
+          const selected = clicked === null ? undefined : visible[clicked];
+          if (selected) {
+            setSessions(null);
+            setSessionId(selected.id);
+          }
+        }
+        return;
+      }
+      if (key.escape) {
+        setSessions(null);
+        return;
+      }
+      if (key.leftArrow) return setHscroll(hoffRef.current - 4);
+      if (key.rightArrow) return setHscroll(hoffRef.current + 4);
+      if (key.upArrow) {
+        const n = visible.length || 1;
+        setSessions((current) =>
+          current ? { ...current, index: (current.index - 1 + n) % n } : current,
+        );
+        return;
+      }
+      if (key.downArrow) {
+        const n = visible.length || 1;
+        setSessions((current) =>
+          current ? { ...current, index: (current.index + 1) % n } : current,
+        );
+        return;
+      }
+      if (key.return) {
+        const selected = visible[sessions.index];
+        if (selected) {
+          setSessions(null);
+          setSessionId(selected.id);
+        }
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setSessions((current) =>
+          current ? { ...current, filter: current.filter.slice(0, -1), index: 0 } : current,
+        );
+        return;
+      }
+      if (ch && !key.ctrl && !key.meta && !key.tab) {
+        setSessions((current) =>
+          current ? { ...current, filter: current.filter + ch, index: 0 } : current,
+        );
+      }
+      return;
+    }
     const pending = pendings[0];
     if (pending) {
       if (key.escape) {
@@ -1368,9 +1534,34 @@ export function App({
         });
       return;
     }
-    // 会话列表浮层不拦截输入（仍可键入 /resume <id>），仅 esc 关闭。
-    if (sessions && key.escape) {
-      setSessions(null);
+    // 很快的组合键可能被 PTY 合并为一个 chunk（"\x18l"）；按 leader + 单键解析。
+    if (!dialogOpen && ch.length === 2 && ch.startsWith("\u0018")) {
+      setBuf("", 0);
+      executeLeader(ch.slice(1));
+      return;
+    }
+    // Ctrl+P 直接打开命令面板（本质是聚焦 `/` 补全菜单）。
+    if ((key.ctrl && ch === "p") || ch === "\u0010") {
+      setBuf("/", 1);
+      setMenuIdx(0);
+      return;
+    }
+
+    // OpenCode 风格 Ctrl+X leader：下一键触发常用动作。
+    if ((key.ctrl && ch === "x") || ch === "\u0018") {
+      if (leaderTimerRef.current) clearTimeout(leaderTimerRef.current);
+      setLeaderPending(true);
+      leaderTimerRef.current = setTimeout(() => {
+        leaderTimerRef.current = null;
+        setLeaderPending(false);
+      }, 1500);
+      return;
+    }
+    if (leaderPending) {
+      if (leaderTimerRef.current) clearTimeout(leaderTimerRef.current);
+      leaderTimerRef.current = null;
+      setLeaderPending(false);
+      executeLeader(ch);
       return;
     }
     if (state.running && key.escape) {
@@ -1522,7 +1713,16 @@ export function App({
       );
     }
     if (pendings[0]) return show(buildPermissionOverlay(pendings, termRows, termCols));
-    if (sessions) return show(buildSessionsOverlay(sessions, termRows, termCols));
+    if (sessions) {
+      const visible = filterSessionRows(sessions.rows, sessions.filter);
+      return show(
+        buildSessionsOverlay(visible, termRows, termCols, {
+          index: sessions.index,
+          filter: sessions.filter,
+          currentId: sessionId,
+        }),
+      );
+    }
     // 斜杠命令菜单：钉在输入框正上方（需读输入面板的绝对行号）。菜单宽度已封顶屏宽，无需横向开窗。
     const menu = matchCommands(allCommands, input);
     const panel = panelRef.current;
@@ -1537,6 +1737,7 @@ export function App({
     picker,
     pendings,
     sessions,
+    sessionId,
     input,
     menuIndex,
     allCommands,
@@ -1553,12 +1754,13 @@ export function App({
     !state.liveText &&
     state.activeTools.size === 0;
 
-  // 只渲染可见窗口内的条目：窗口约 2×termRows 个（历史条目不进 yoga 布局），
-  // 把整棵树的布局代价与会话长度解耦。scrollOffset 决定窗口结束位置（0=贴底）。
+  // 只渲染尾部的动态窗口，避免无限历史拖慢 Yoga；向上滚动时逐步把更早条目纳入。
+  // scrollOffset 是终端行数，真正的移动由结果内容容器的负底边距完成，因此单条超长回复
+  // 也能逐行回看，不再只能按整条消息跳动。
   const WIN = termRows * 2 + 16;
-  const winEnd = Math.max(1, state.items.length - scrollOffset);
-  const winStart = Math.max(0, winEnd - WIN);
-  const visibleItems = conversationEmpty ? state.items : state.items.slice(winStart, winEnd);
+  const renderedItemCount = WIN + Math.ceil(scrollOffset / 2);
+  const winStart = Math.max(0, state.items.length - renderedItemCount);
+  const visibleItems = conversationEmpty ? state.items : state.items.slice(winStart);
   const baseKey = conversationEmpty ? 0 : winStart;
 
   const spinner = state.running ? SPINNER[spin % SPINNER.length]! : "●";
@@ -1584,11 +1786,28 @@ export function App({
 
   // 浮层模式下背景常驻可见（对齐 opencode），故弹框打开时仍渲染输入框；
   // 非浮层模式沿用旧行为：被授权弹窗/选择器接管时不渲染输入框。
-  const showInput = overlayMode || (!pendings[0] && !picker);
+  const showInput = overlayMode || (!pendings[0] && !picker && !sessions);
   // 非浮层模式（测试）下命令菜单改由 in-tree 渲染在输入框上方；浮层模式由写入层合成盖屏。
   const inTreeMenu = !overlayMode ? matchCommands(allCommands, input) : [];
+  // 提示行仅在需要时出现（对齐 opencode 的极简）：运行中显示中断/追加；
+  // 计划模式或临时模型激活时提示其状态；否则空闲态不显示常规导航提示。
+  const hintItems = leaderPending
+    ? [
+        t(
+          "ctrl+x: n new · l sessions · m models · s status · c compact · u undo · q quit",
+          "ctrl+x：n 新建 · l 会话 · m 模型 · s 状态 · c 压缩 · u 撤销 · q 退出",
+        ),
+      ]
+    : state.running
+      ? [t("esc interrupt", "esc 中断"), t("enter append", "enter 追加")]
+      : [
+          ...(planMode ? [t("◆ plan mode (read-only)", "◆ 计划模式（只读）")] : []),
+          ...(nextModel
+            ? [t(`↳ next: ${nextModel} (once)`, `↳ 下一条: ${nextModel}（仅一次）`)]
+            : []),
+        ];
   const inputCluster = showInput ? (
-    <Box flexDirection="column" marginTop={1} marginBottom={1}>
+    <Box flexDirection="column" marginTop={1}>
       {inTreeMenu.length > 0 ? <CommandMenu rows={inTreeMenu} index={menuIndex} /> : null}
       <InputPanel
         panelRef={panelRef}
@@ -1601,45 +1820,37 @@ export function App({
         spinner={spinner}
         width={termCols}
       />
-      <Box justifyContent="flex-end">
-        <Text dimColor wrap="truncate">
-          {fitHints(
-            state.running
-              ? [t("esc interrupt", "esc 中断"), t("enter append", "enter 追加")]
-              : [
-                  // 计划模式置顶提示：让「现在是只读」这件事一眼可见。
-                  ...(planMode ? [t("◆ plan mode (read-only)", "◆ 计划模式（只读）")] : []),
-                  ...(nextModel
-                    ? [t(`↳ next: ${nextModel} (once)`, `↳ 下一条: ${nextModel}（仅一次）`)]
-                    : []),
-                  t("/model switch model", "/model 换模型"),
-                  t("↑↓ history", "↑↓ 历史"),
-                  t("PageUp scroll back", "PageUp 回看"),
-                  t("ctrl+z exit", "ctrl+z 退出"),
-                ],
-            termCols,
-          )}
-        </Text>
-      </Box>
+      {hintItems.length > 0 ? (
+        <Box justifyContent="flex-end">
+          <Text dimColor wrap="truncate">
+            {fitHints(hintItems, termCols)}
+          </Text>
+        </Box>
+      ) : null}
       {conversationEmpty && termRows >= 22 && !picker && !pendings[0] && !sessions ? (
         <WelcomeTip width={termCols} />
       ) : null}
     </Box>
   ) : null;
 
-  // 底部状态栏（窄屏下逐段让位，避免折行把整屏布局顶掉）。
-  const fullBrand = `${APP_NAME} v${version}`;
+  // 底部状态栏精简为一行（对齐 opencode）：左 cwd，右 token/花费。模型已在输入框内展示，
+  // 这里不再重复；品牌行也去掉。成本无价格信息时省略。
   const cwdLabel = tildify(state.meta.cwd);
-  const brand = dispWidth(cwdLabel) + dispWidth(fullBrand) + 1 <= termCols ? fullBrand : APP_NAME;
-  // 成本估算跟在 token 后展示（对齐 Claude Code /usage 的美元维度）；无价格信息时省略。
   const costPart =
     state.costUSD !== undefined && state.costUSD > 0 ? ` · $${state.costUSD.toFixed(4)}` : "";
-  const statusLine = `${state.meta.model} · in ${u.inputTokens} / out ${u.outputTokens} tokens${costPart}`;
+  const statusRight = `${u.inputTokens}/${u.outputTokens} tokens${costPart}`;
 
   // 底部控件：会话列表 / 授权弹窗 / 输入框。浮层模式下前两者改为盖屏合成，这里只留输入框。
   const controls = (
     <>
-      {!overlayMode && sessions ? <SessionList sessions={sessions} /> : null}
+      {!overlayMode && sessions ? (
+        <SessionList
+          sessions={filterSessionRows(sessions.rows, sessions.filter)}
+          index={sessions.index}
+          filter={sessions.filter}
+          currentId={sessionId}
+        />
+      ) : null}
       {!overlayMode && pendings[0] ? (
         <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
           <Text color="yellow">
@@ -1672,58 +1883,104 @@ export function App({
   );
 
   return (
-    <Box flexDirection="column" height={termRows}>
+    <Box flexDirection="column" height={termRows} overflow="hidden">
       {conversationEmpty ? (
-        // 空会话：顶部保留会话边界，logo + 输入框作为一组在垂直方向居中（对齐 opencode）。
+        // 首次进入 / 空会话：opencode 风格欢迎页——顶部保留会话边界与信息条目，
+        // 大 logo + 输入框（含 Tip）作为一组垂直居中。
         <>
           {state.items
             .filter((i) => i.kind !== "logo")
             .map((item, i) => (
-              <ItemView key={`top:${i}`} item={item as Item} />
+              <ItemView key={`top:${i}`} item={item as Item} width={termCols} />
             ))}
-          <Box flexGrow={1} flexDirection="column" justifyContent="center">
+          <Box
+            flexGrow={1}
+            minHeight={0}
+            flexDirection="column"
+            overflow="hidden"
+            justifyContent="center"
+          >
             <Welcome width={termCols} />
             {controls}
           </Box>
         </>
       ) : (
         <>
-          {/* 会话进行中：记录贴底（最新可见），输入框固定在下方。 */}
-          <Box flexGrow={1} flexDirection="column" overflow="hidden" justifyContent="flex-end">
-            {visibleItems.map((item, i) =>
-              item.kind === "logo" ? null : <ItemView key={baseKey + i} item={item} />,
-            )}
+          {/*
+           * 固定视口布局：会话区占据剩余高度并贴底（最新可见），输入框固定在下方。
+           * minHeight={0} + overflow hidden 让会话区在内容超高时只裁掉顶部，绝不把整帧顶出
+           * 终端而导致「整体滑动」；PageUp/PageDown 通过 scrollOffset 在会话区内回看历史。
+           */}
+          <Box
+            ref={transcriptViewportRef}
+            flexGrow={1}
+            flexShrink={1}
+            flexBasis={0}
+            minHeight={0}
+            flexDirection="column"
+            overflow="hidden"
+            justifyContent="flex-end"
+          >
+            {/*
+             * 内层 flexShrink={0}：不让 Ink 把消息行按 flex 压缩（否则会渲染成
+             * 「隔行采样」的错乱内容并溢出终端）。外层贴底 + overflow 裁掉顶部，
+             * 于是永远只显示最新内容的连续尾部，输入框牢牢固定在下方、终端不出滚动条。
+             */}
+            <Box
+              ref={transcriptContentRef}
+              flexShrink={0}
+              flexDirection="column"
+              marginBottom={-scrollOffset}
+            >
+              {visibleItems.map((item, i) =>
+                item.kind === "logo" ? null : (
+                  <ItemView key={baseKey + i} item={item} width={termCols} />
+                ),
+              )}
 
-            {state.liveText ? (
-              <Box>
-                <Text color="green">{spinner} </Text>
-                <Text>{state.liveText}</Text>
-              </Box>
-            ) : state.running && state.liveThinking ? (
-              // 思考酝酿期：暗色斜体滚动展示尾部（对齐 Claude Code 的 thinking 可见性）。
-              <Box>
-                <Text color="magenta">✻ </Text>
-                <Text dimColor italic>
-                  {thinkingTail(state.liveThinking, termCols)}
-                </Text>
-              </Box>
-            ) : state.running ? (
-              <Box>
-                <Text color="yellow">{spinner} </Text>
-                <Text dimColor>
-                  {t(
-                    `generating… ${elapsedS}s (esc interrupt)`,
-                    `生成中… ${elapsedS}s（esc 中断）`,
-                  )}
-                </Text>
-              </Box>
-            ) : null}
+              {state.liveText ? (
+                <Box>
+                  <Text color="green">{spinner} </Text>
+                  <Text>{state.liveText}</Text>
+                </Box>
+              ) : state.running && state.liveThinking ? (
+                // 思考酝酿期：暗色斜体滚动展示尾部（对齐 Claude Code 的 thinking 可见性）。
+                <Box>
+                  <Text color="magenta">✻ </Text>
+                  <Text dimColor italic>
+                    {thinkingTail(state.liveThinking, termCols)}
+                  </Text>
+                </Box>
+              ) : state.running ? (
+                <Box>
+                  <Text color="yellow">{spinner} </Text>
+                  <Text dimColor>
+                    {t(
+                      `generating… ${elapsedS}s (esc interrupt)`,
+                      `生成中… ${elapsedS}s（esc 中断）`,
+                    )}
+                  </Text>
+                </Box>
+              ) : null}
 
-            {[...state.activeTools.values()].map((tool) => (
-              <ItemView key={tool.id} item={tool} />
-            ))}
+              {[...state.activeTools.values()].map((tool) => {
+                const activity =
+                  tool.name === "task" ? state.subagentActivity.get(tool.id) : undefined;
+                return (
+                  <Box key={tool.id} flexDirection="column">
+                    <ItemView item={tool} />
+                    {activity ? (
+                      <Text dimColor wrap="truncate">
+                        {"  ↳ "}
+                        {truncate(activity, Math.max(0, termCols - 6))}
+                      </Text>
+                    ) : null}
+                  </Box>
+                );
+              })}
 
-            {state.todos.length > 0 ? <TodoList todos={state.todos} /> : null}
+              {state.todos.length > 0 ? <TodoList todos={state.todos} /> : null}
+            </Box>
           </Box>
 
           {scrollOffset > 0 ? (
@@ -1741,18 +1998,13 @@ export function App({
         </>
       )}
 
-      <Box flexDirection="column" marginTop={1}>
-        <Box justifyContent="space-between">
-          {/* 品牌先占位，路径拿剩下的列；空间不足时品牌省略版本，路径仍从头部截断 */}
-          <Text dimColor wrap="truncate">
-            {truncWidthStart(cwdLabel, termCols - dispWidth(brand) - 1)}
-          </Text>
-          <Text dimColor wrap="truncate">
-            {brand}
-          </Text>
-        </Box>
+      <Box marginTop={1} justifyContent="space-between">
+        {/* 路径拿左侧剩余列（尾部优先，从头截断）；token/花费固定在右。 */}
         <Text dimColor wrap="truncate">
-          {truncWidth(statusLine, termCols)}
+          {truncWidthStart(cwdLabel, termCols - dispWidth(statusRight) - 1)}
+        </Text>
+        <Text dimColor wrap="truncate">
+          {statusRight}
         </Text>
       </Box>
     </Box>
@@ -1827,9 +2079,19 @@ function handleEvent(
       break;
     case "tool_input_delta":
       break;
-    case "tool_progress":
-      if (isTodoProgress(ev.event)) dispatch({ t: "todos", todos: ev.event.todos });
+    case "tool_progress": {
+      if (isTodoProgress(ev.event)) {
+        dispatch({ t: "todos", todos: ev.event.todos });
+        break;
+      }
+      // task 工具把子 agent 的内部事件经此通道转发上来（ev.id=task 调用 id）。
+      // 取一条活动行（子 agent 当前在跑什么工具），实时显示在该 task 行下方。
+      if (ev.name === "task") {
+        const line = subagentActivityLine(ev.event);
+        if (line) dispatch({ t: "subagentActivity", id: ev.id, line });
+      }
       break;
+    }
     case "turn_reset":
       dispatch({ t: "resetLive" });
       break;
@@ -1947,11 +2209,21 @@ function helpText(): string {
       "/model <provider/model> Start a new session directly with the given model",
       "/model <provider/model> 直接以指定模型新建会话",
     ),
-    t("/sessions             List recent sessions", "/sessions             列出最近会话"),
-    t("/resume <sessionId>   Load an existing session", "/resume <sessionId>   载入已有会话"),
+    t(
+      "/sessions             Search and switch sessions (/resume and /continue)",
+      "/sessions             搜索并切换会话（也可用 /resume、/continue）",
+    ),
+    t(
+      "/resume <sessionId>   Load directly; without an id, open the picker",
+      "/resume <sessionId>   直接载入；不带 id 时打开选择器",
+    ),
     t(
       "/new [title]          Start a new session with the current model and directory",
       "/new [标题]           以当前模型和目录新建会话",
+    ),
+    t(
+      "Ctrl+P command palette · Ctrl+X then n/l/m/s/c/u/q for common actions",
+      "Ctrl+P 命令面板 · Ctrl+X 后按 n/l/m/s/c/u/q 执行常用操作",
     ),
     t(
       "/undo [mode]          Rewind the last turn; mode: files (default) / conversation / both",
@@ -1964,6 +2236,10 @@ function helpText(): string {
     t(
       "/plan [on|off]        Toggle plan mode: read-only planning; exit to execute",
       "/plan [on|off]        切换计划模式：只读规划；退出后再执行",
+    ),
+    t(
+      "/skills               List auto-detected skills and availability",
+      "/skills               列出自动发现的技能及可用状态",
     ),
     t("/lang <en|zh>         Switch UI language", "/lang <en|zh>         切换界面语言"),
     t("/exit                 Exit", "/exit                 退出"),
@@ -2005,6 +2281,35 @@ function providersText(
       return `${provider.id} · ${provider.name} · ${provider.protocol} · ${provider.local ? t("local", "本地") : t("cloud", "云端")} · ${credential}`;
     }),
   ].join("\n");
+}
+
+function skillsText(skills: readonly SkillMeta[]): string {
+  if (skills.length === 0) {
+    return t(
+      "No skills detected. Drop a <name>/SKILL.md under ~/.claude/skills, ~/.agents/skills, or <project>/.claude/skills.",
+      "未发现技能。可在 ~/.claude/skills、~/.agents/skills 或 <项目>/.claude/skills 下放置 <名字>/SKILL.md。",
+    );
+  }
+  const home = os.homedir();
+  const short = (p: string | undefined): string =>
+    p && p.startsWith(home) ? `~${p.slice(home.length)}` : (p ?? "");
+  const ready = skills.filter((s) => s.available !== false).length;
+  const header = t(
+    `Detected ${skills.length} skill(s), ${ready} ready. Load one with the skill tool when a task matches:`,
+    `发现 ${skills.length} 个技能，${ready} 个就绪。任务匹配时用 skill 工具加载：`,
+  );
+  const rows = skills.map((s) => {
+    const status =
+      s.available === false
+        ? t(
+            ` — unavailable (needs ${s.requiresBins?.join(", ") ?? "a CLI"})`,
+            ` — 不可用（需 ${s.requiresBins?.join("、") ?? "某 CLI"}）`,
+          )
+        : "";
+    const desc = (s.description || t("(no description)", "（无描述）")).slice(0, 80);
+    return `• ${s.name}${status}\n    ${desc}\n    ${short(s.sourceRoot)}`;
+  });
+  return [header, ...rows].join("\n");
 }
 
 interface PickerRow {
@@ -2231,7 +2536,7 @@ function ProviderHeader({ name }: { name: string }) {
   );
 }
 
-// ---------- 欢迎页 logo ----------
+// ---------- 欢迎页 logo（仅首次进入 / 空会话展示，对齐 opencode） ----------
 
 /** 取 s 在 [from, to) 这段全局列区间内的可见部分；s 自身占据 [offset, offset+s.length)。 */
 function clipSegment(s: string, offset: number, from: number, to: number): string {
@@ -2240,25 +2545,26 @@ function clipSegment(s: string, offset: number, from: number, to: number): strin
   return b <= a ? "" : s.slice(a - offset, b - offset);
 }
 
-// opencode 同款：3 行半块（▀▄█）大字 wordmark。前段 ani 中灰、后段 code 亮白。
-// 每个字形三行等宽，字间留 1 列。窄屏放不下时回落到紧凑单行，不折行不变形。
-const LOGO_GLYPHS: Record<string, [string, string, string]> = {
-  a: ["█▀▀█", "█▀▀█", "▀  ▀"],
-  n: ["█▀▀▄", "█  █", "▀  ▀"],
-  i: ["█", "█", "▀"],
-  c: ["█▀▀", "█  ", "▀▀▀"],
-  o: ["█▀▀█", "█  █", "▀▀▀▀"],
-  d: ["█▀▀▄", "█  █", "▀▀▀ "],
-  e: ["█▀▀", "█▀▀", "▀▀▀"],
+// opencode 风格：5 行实心块（█）大字 wordmark，笔画 1 格宽（与 opencode 同等纤细），
+// 字形普遍 4 列宽（i 3 列），字间留 1 空列。前段 ani 中灰、后段 code 亮白。
+const LOGO_ROWS = 5;
+const LOGO_GLYPHS: Record<string, string[]> = {
+  a: [" ██ ", "█  █", "████", "█  █", "█  █"],
+  n: ["█  █", "██ █", "█ ██", "█  █", "█  █"],
+  i: ["███", " █ ", " █ ", " █ ", "███"],
+  c: [" ███", "█   ", "█   ", "█   ", " ███"],
+  o: ["████", "█  █", "█  █", "█  █", "████"],
+  d: ["███ ", "█  █", "█  █", "█  █", "███ "],
+  e: ["████", "█   ", "███ ", "█   ", "████"],
 };
 
-/** 把若干字母拼成 3 行块字（字间 1 空列）。 */
-function bigWord(letters: string): [string, string, string] {
-  const rows: [string, string, string] = ["", "", ""];
+/** 把若干字母拼成 LOGO_ROWS 行块字（字间 1 空列）。 */
+function bigWord(letters: string): string[] {
+  const rows: string[] = Array.from({ length: LOGO_ROWS }, () => "");
   const chars = [...letters];
   chars.forEach((ch, idx) => {
     const g = LOGO_GLYPHS[ch]!;
-    for (let r = 0; r < 3; r++) rows[r] += (idx > 0 ? " " : "") + g[r];
+    for (let r = 0; r < LOGO_ROWS; r++) rows[r] += (idx > 0 ? " " : "") + g[r];
   });
   return rows;
 }
@@ -2266,14 +2572,15 @@ function bigWord(letters: string): [string, string, string] {
 export function Welcome({ width }: { width: number }) {
   const head = bigWord("ani");
   const tail = bigWord("code");
-  const headW = head[0].length;
-  const bigW = headW + 1 + tail[0].length; // ani + 空列 + code
-  // 始终画 3 行大 logo；放不下就居中裁两侧（大不了两边显示不全），不回落单行、不折行。
+  const headW = head[0]!.length;
+  const bigW = headW + 1 + tail[0]!.length; // ani + 空列 + code
+  // 始终画完整 logo；放不下就居中裁两侧（大不了两边显示不全），不回落、不折行。
+  // marginBottom 与下方输入框之间留出间距（对齐 opencode 的呼吸感）。
   const from = Math.max(0, Math.floor((bigW - width) / 2));
   const to = from + Math.min(width, bigW);
   return (
-    <Box flexDirection="column" alignItems="center">
-      {[0, 1, 2].map((r) => (
+    <Box flexDirection="column" alignItems="center" marginBottom={2}>
+      {Array.from({ length: LOGO_ROWS }).map((_, r) => (
         <Text key={r} wrap="truncate">
           <Text color="#6b6b6b">{clipSegment(head[r]!, 0, from, to)}</Text>
           <Text>{clipSegment(" ", headW, from, to)}</Text>
@@ -2353,6 +2660,35 @@ function isTodoProgress(value: unknown): value is { type: "todos"; todos: TodoIt
   return v.type === "todos" && Array.isArray(v.todos);
 }
 
+/**
+ * 从子 agent 转发上来的内部事件里提炼一条「它正在干什么」的活动行。
+ * 只取工具动作（信息量最大）：tool_start=正在调用某工具，tool_result=某工具刚完成；
+ * 嵌套子 agent（编排型再往下派）的事件是 tool_progress 套 tool_progress，递归下钻到叶子，
+ * 每下探一层加一个 › 前缀表示层级。文本/思考等噪声事件返回 null（不刷新活动行）。
+ */
+export function subagentActivityLine(inner: unknown): string | null {
+  if (!inner || typeof inner !== "object") return null;
+  const e = inner as {
+    type?: string;
+    name?: string;
+    ruleKey?: string;
+    isError?: boolean;
+    event?: unknown;
+  };
+  switch (e.type) {
+    case "tool_start":
+      return `⚙ ${e.name ?? ""}${e.ruleKey ? ` ${truncate(e.ruleKey, 40)}` : ""}`.trim();
+    case "tool_result":
+      return `${e.isError ? "✖" : "✔"} ${e.name ?? ""}`.trim();
+    case "tool_progress": {
+      const deeper = subagentActivityLine(e.event);
+      return deeper ? `› ${deeper}` : null;
+    }
+    default:
+      return null;
+  }
+}
+
 function TodoList({ todos }: { todos: TodoItem[] }) {
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1}>
@@ -2424,23 +2760,45 @@ function CommandMenu({ rows, index }: { rows: CommandMenuRow[]; index: number })
   );
 }
 
-function SessionList({ sessions }: { sessions: SessionSummary[] }) {
+function SessionList({
+  sessions,
+  index,
+  filter,
+  currentId,
+}: {
+  sessions: SessionSummary[];
+  index: number;
+  filter: string;
+  currentId: string;
+}) {
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
       <Text color="cyan" bold>
-        {t("Sessions (/resume <id> to load)", "会话列表（/resume <id> 载入）")}
+        {t("Sessions", "会话列表")}
       </Text>
-      {sessions.length === 0 ? <Text dimColor>{t("(no sessions)", "（暂无会话）")}</Text> : null}
-      {sessions.slice(0, 10).map((s) => (
-        <Text key={s.id}>
-          <Text color="green">{s.id}</Text>
-          {s.running ? <Text color="yellow">{t(" ●running", " ●运行中")}</Text> : null}
-          <Text dimColor>
-            {" "}
-            {s.title ?? t("(untitled)", "(无标题)")} · {s.model}
-          </Text>
+      <Text dimColor>
+        {filter ? `${filter} ` : ""}
+        {t("Search · ↑↓ select · Enter open · esc close", "搜索 · ↑↓ 选择 · Enter 打开 · esc 关闭")}
+      </Text>
+      {sessions.length === 0 ? (
+        <Text dimColor>
+          {filter
+            ? t("(no matching sessions)", "（无匹配会话）")
+            : t("(no sessions)", "（暂无会话）")}
         </Text>
-      ))}
+      ) : null}
+      {sessions.slice(0, 10).map((s, i) => {
+        const selected = i === index;
+        const current = s.id === currentId;
+        return (
+          <Text key={s.id} {...(selected ? { backgroundColor: PICKER_HL, color: "black" } : {})}>
+            {current ? "● " : "  "}
+            {s.title ?? t("(untitled)", "(无标题)")}
+            {s.running ? t(" · running", " · 运行中") : ""}
+            <Text dimColor={!selected}> {s.model}</Text>
+          </Text>
+        );
+      })}
     </Box>
   );
 }
@@ -2472,6 +2830,54 @@ function sliceCols(s: string, from: number, to: number): string {
     out += start < from || end > to ? " ".repeat(Math.min(end, to) - Math.max(start, from)) : ch;
   }
   return out;
+}
+
+/** 按显示宽度把文本折成多行（保留原有换行；CJK 无词边界，按列硬折即可）。 */
+function wrapCols(text: string, width: number): string[] {
+  const out: string[] = [];
+  for (const para of text.split("\n")) {
+    const total = dispWidth(para);
+    if (total === 0) {
+      out.push("");
+      continue;
+    }
+    for (let start = 0; start < total; start += width)
+      out.push(sliceCols(para, start, start + width));
+  }
+  return out.length > 0 ? out : [""];
+}
+
+/**
+ * 用户消息气泡：与输入框同款——左侧青色竖条 + 深灰底 + 上下留白，整行填满背景。
+ * 对齐 opencode 的用户消息展示。文本按可用宽度折行。
+ */
+function UserBubble({ text, width }: { text: string; width: number }) {
+  const avail = Math.max(1, width - 3); // 竖条(1) + 左空格(1) + 右留白(1)
+  const lines = wrapCols(text, avail);
+  const rows: { content: React.ReactNode; used: number }[] = [
+    { content: null, used: 0 },
+    ...lines.map((line) => ({
+      content: (
+        <>
+          {" "}
+          <Text color="#e6e6e6">{line}</Text>
+        </>
+      ),
+      used: 1 + dispWidth(line),
+    })),
+    { content: null, used: 0 },
+  ];
+  return (
+    <Box flexDirection="column" width={width} marginTop={1}>
+      {rows.map((r, i) => (
+        <Text key={i} backgroundColor={PANEL_BG} wrap="truncate">
+          <Text color={PANEL_BAR}>▎</Text>
+          {r.content}
+          {pad(width, 1 + r.used)}
+        </Text>
+      ))}
+    </Box>
+  );
 }
 
 type Seg = { t: string; color: string };
@@ -2568,7 +2974,8 @@ export function InputPanel({
     inputW = 1 + 1 + dispWidth(ph);
   }
 
-  // 模型行：前导空格 + spinner + 空格 之后，把各段按剩余列预算依次裁掉。
+  // 模型行：前导空格 +（运行中才画的 spinner）+ 各段按剩余列预算依次裁掉。
+  // 空闲态不再显示 ● 点（对齐 opencode）；spinner 仅在生成时作为活动指示出现。
   const metaSegs = fitSegments(
     [
       { t: model, color: "white" },
@@ -2577,7 +2984,8 @@ export function InputPanel({
     ],
     Math.max(0, width - 4),
   );
-  const metaUsed = 3 + metaSegs.reduce((w, s) => w + dispWidth(s.t), 0);
+  // 前导 1 列空格；运行时再加 spinner + 空格（共 3 列），空闲时只占 1 列。
+  const metaUsed = (running ? 3 : 1) + metaSegs.reduce((w, s) => w + dispWidth(s.t), 0);
 
   // 每行统一：竖条(▎, 1/4 块，宽 1 格) + 内容 + 补白；竖条贯穿整块高度（对齐 opencode）。
   // wrap=truncate 兜底：上面的列宽都算准了才不会真截到字，但即便算漏一格，
@@ -2599,7 +3007,11 @@ export function InputPanel({
       {rowLine(
         <>
           {" "}
-          <Text color={running ? "yellow" : PANEL_BAR}>{spinner}</Text>{" "}
+          {running ? (
+            <>
+              <Text color="yellow">{spinner}</Text>{" "}
+            </>
+          ) : null}
           {metaSegs.map((s) => (
             <Text key={s.t} color={s.color}>
               {s.t}
@@ -2616,12 +3028,15 @@ export function InputPanel({
 // memo：历史条目引用不变时跳过重渲染，流式期间只有尾部活动条目会更新。
 const ItemView = React.memo(ItemViewImpl);
 
-function ItemViewImpl({ item }: { item: Item }) {
+function ItemViewImpl({ item, width }: { item: Item; width?: number }) {
   switch (item.kind) {
     case "info":
       return <Text dimColor>{item.text}</Text>;
     case "user":
-      return (
+      // 有终端宽度时用青色竖条 + 深灰底的气泡（对齐 opencode）；无宽度（兜底）退回 ❯ 前缀。
+      return width ? (
+        <UserBubble text={item.text} width={width} />
+      ) : (
         <Box>
           <Text color="blue" bold>
             ❯{" "}

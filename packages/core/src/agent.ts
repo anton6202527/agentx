@@ -129,11 +129,11 @@ export interface AgentOptions {
     | SubagentDefinition[]
     | { definitions?: SubagentDefinition[]; discover?: boolean; dirs?: string[] };
   /**
-   * 启用 skills 渐进加载：扫描 .claude/skills（项目级+用户级），
+   * 启用 skills 渐进加载：扫描 .claude/skills（项目级+用户级）与全局技能根，
    * 清单注入 system 提示（L1），正文经 skill 工具按需加载（L2）。
-   * 传对象可追加扫描目录。默认关。
+   * 传对象可追加扫描目录（dirs）或按名排除技能（disabled，供 UI 开关）。默认关。
    */
-  skills?: boolean | { dirs?: string[] };
+  skills?: boolean | { dirs?: string[]; disabled?: string[] };
   maxTurns?: number;
   maxTokens?: number;
   /**
@@ -234,6 +234,8 @@ function defaultSystem(): string {
 - Understand the relevant code before acting: use read/grep/glob to learn the structure and conventions; don't change things on a guess.
 - Keep edits precise and minimal, doing only what was asked; no drive-by refactors, no unrelated changes.
 - When a task involves several uncertain steps, use todo_write to lay out a checklist and update it as you go, so the user sees the plan.
+- For broad search across many files, cross-file investigation, or several independent subtasks, delegate them with the task tool instead of doing it all yourself — the subagent's intermediate steps don't consume your context; you get back only its conclusion.
+- Pure read-only investigations (the explore type) are side-effect-free and parallelizable: dispatch several in one turn to fan out, then synthesize. Use explore for search/read-to-conclusion, general for subtasks that must edit files or run commands.
 - When you hit a fork you can't settle on your own (destructive, ambiguous, or several reasonable approaches), stop and ask the user rather than betting on one.
 
 # Using tools
@@ -262,6 +264,8 @@ function defaultSystem(): string {
 - 动手前先了解相关代码：用 read/grep/glob 摸清结构与约定，不要凭猜测改动。
 - 修改精确、最小化，只做被要求的事；不顺手重构、不留无关改动。
 - 一次任务涉及多个不确定步骤时，用 todo_write 列清单并随进度更新，让用户看到规划。
+- 遇到大范围检索、跨多文件调研、或多个互相独立的子任务时，用 task 工具委派给子 agent，别全都自己串着做 —— 子 agent 的中间步骤不占你的上下文，只回传结论。
+- 纯只读的调研（explore 类型）无副作用、可并行：在同一轮里一次派出多个 fan-out，再汇总。搜索/读代码得结论用 explore，需要改文件或跑命令的子任务用 general。
 - 遇到无法自行判断的分叉（有破坏性、需求含糊、多种合理方案）时，停下来问用户，而不是赌一个。
 
 # 工具使用
@@ -1409,8 +1413,11 @@ export class Agent {
       }
     }
     if (this.skillsOpt) {
-      const extraDirs = typeof this.skillsOpt === "object" ? (this.skillsOpt.dirs ?? []) : [];
-      const skills = await discoverSkills(this.cwd, extraDirs);
+      const opt = typeof this.skillsOpt === "object" ? this.skillsOpt : {};
+      const extraDirs = opt.dirs ?? [];
+      const disabled = new Set(opt.disabled ?? []);
+      const discovered = await discoverSkills(this.cwd, extraDirs);
+      const skills = disabled.size ? discovered.filter((s) => !disabled.has(s.name)) : discovered;
       if (skills.length > 0) {
         const skillTool = createSkillTool(skills);
         this.tools.register(skillTool);

@@ -35,6 +35,17 @@ test("parseSubagentFile: 完整 frontmatter + 正文为 system", () => {
   assert.equal(def.system, "You review code.");
 });
 
+test("parseSubagentFile: orchestrator: true 解析为编排型", () => {
+  const def = parseSubagentFile(
+    "boss.md",
+    ["---", "description: 编排者", "orchestrator: true", "---", "拆活分派。"].join("\n"),
+  );
+  assert.equal(def?.orchestrator, true);
+  // 未声明则不带该字段（默认非编排型）。
+  const plain = parseSubagentFile("p.md", "---\ndescription: 普通\n---\nbody");
+  assert.equal(plain?.orchestrator, undefined);
+});
+
 test("parseSubagentFile: 文件名兜底 name；缺 description 无效", () => {
   const ok = parseSubagentFile("helper.md", "---\ndescription: 帮忙\n---\nbody");
   assert.equal(ok?.name, "helper");

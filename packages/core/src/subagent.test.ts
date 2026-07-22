@@ -113,6 +113,63 @@ test("subagent: 显式 def.tools 也强制剔除 task", async () => {
   assert.deepEqual(childTools.sort(), ["bash", "read"]);
 });
 
+test("subagent: orchestrator 型在深度预算内保留 task（可再往下派）", async () => {
+  const sink: { opts?: AgentOptions } = {};
+  const tool = createTaskTool({
+    makeAgent: capturingMakeAgent(sink),
+    provider: { name: "p", async *stream() {} },
+    model: "m",
+    cwd: "/x",
+    tools: parentRegistry(),
+    definitions: [{ name: "boss", description: "编排者", orchestrator: true }],
+  });
+  const signal = new AbortController().signal;
+  await tool.run(
+    { description: "编排", prompt: "拆活", subagent_type: "boss" },
+    { cwd: "/x", signal },
+  );
+  const childTools = sink.opts!.tools!.names();
+  assert.ok(childTools.includes("task"), "编排型子 agent 应破例保留 task 以便再派");
+  // 仍经 childTools 直挂，不走 subagents 选项（深度由 createTaskTool 内部管理）。
+  assert.equal(sink.opts!.subagents, undefined);
+});
+
+test("subagent: 到达深度上限后编排型也不再获得 task（防无限递归）", async () => {
+  const sink: { opts?: AgentOptions } = {};
+  const tool = createTaskTool({
+    makeAgent: capturingMakeAgent(sink),
+    provider: { name: "p", async *stream() {} },
+    model: "m",
+    cwd: "/x",
+    tools: parentRegistry(),
+    definitions: [{ name: "boss", description: "编排者", orchestrator: true }],
+    depth: 2,
+    maxDepth: 2,
+  });
+  const signal = new AbortController().signal;
+  await tool.run(
+    { description: "编排", prompt: "拆活", subagent_type: "boss" },
+    { cwd: "/x", signal },
+  );
+  const childTools = sink.opts!.tools!.names();
+  assert.ok(!childTools.includes("task"), "达深度上限的编排型不得再获得 task");
+});
+
+test("subagent: 非 orchestrator 型即便到不了上限也无 task（默认安全）", async () => {
+  const sink: { opts?: AgentOptions } = {};
+  const tool = createTaskTool({
+    makeAgent: capturingMakeAgent(sink),
+    provider: { name: "p", async *stream() {} },
+    model: "m",
+    cwd: "/x",
+    tools: parentRegistry(),
+    definitions: [{ name: "plain", description: "普通子 agent" }],
+  });
+  const signal = new AbortController().signal;
+  await tool.run({ description: "x", prompt: "y", subagent_type: "plain" }, { cwd: "/x", signal });
+  assert.ok(!sink.opts!.tools!.names().includes("task"), "未声明 orchestrator 一律无 task");
+});
+
 test("subagent: disallowedTools 从继承集/显式集剔除（支持 glob）", async () => {
   const sink: { opts?: AgentOptions } = {};
   const registry = new ToolRegistry()

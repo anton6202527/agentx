@@ -45,9 +45,49 @@ test("skills: 项目级同名 skill 覆盖用户级，并发现额外目录", as
       name: "shared",
       description: "project version",
       file: projectFile,
+      dir: path.dirname(projectFile),
+      sourceRoot: path.join(project, ".claude", "skills"),
+      available: true,
     });
     assert.equal(found.find((skill) => skill.name === "extra")?.description, "extra version");
     assert.equal(found.filter((skill) => skill.name === "shared").length, 1);
+  } finally {
+    if (oldHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = oldHome;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("skills: 自动检测 metadata.requires.bins，缺依赖标 available=false", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "anicode-skill-req-"));
+  const home = path.join(root, "home");
+  const project = path.join(root, "project");
+  const oldHome = process.env["HOME"];
+  process.env["HOME"] = home;
+  try {
+    // node 一定在 PATH 上 → 可用；一个不存在的二进制 → 不可用；无 requires → 可用。
+    await writeSkill(
+      path.join(project, ".claude", "skills"),
+      "needs-node",
+      "---\nname: needs-node\ndescription: d\nmetadata:\n  requires:\n    bins: [node]\n---\nbody",
+    );
+    await writeSkill(
+      path.join(project, ".claude", "skills"),
+      "needs-missing",
+      "---\nname: needs-missing\ndescription: d\nmetadata:\n  requires:\n    bins: [anicode-nope-xyz]\n---\nbody",
+    );
+    await writeSkill(
+      path.join(project, ".claude", "skills"),
+      "plain",
+      "---\nname: plain\ndescription: d\n---\nbody",
+    );
+
+    const found = await discoverSkills(project);
+    assert.equal(found.find((s) => s.name === "needs-node")?.available, true);
+    assert.deepEqual(found.find((s) => s.name === "needs-node")?.requiresBins, ["node"]);
+    assert.equal(found.find((s) => s.name === "needs-missing")?.available, false);
+    assert.equal(found.find((s) => s.name === "plain")?.available, true);
+    assert.equal(found.find((s) => s.name === "plain")?.requiresBins, undefined);
   } finally {
     if (oldHome === undefined) delete process.env["HOME"];
     else process.env["HOME"] = oldHome;

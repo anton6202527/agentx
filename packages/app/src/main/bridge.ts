@@ -60,6 +60,11 @@ const EVENT_CHANNEL = "anicode:event";
 export class Bridge {
   private readonly manager: SessionManager;
   private readonly plugins: PluginRuntime;
+  /**
+   * 被市场关闭的文件系统技能名。稳定引用传给 SessionManager 的 skills.disabled，
+   * 开关时原地更新内容 —— 新建的会话在首次 send 读它，即时生效（已进行中的会话不受影响）。
+   */
+  private readonly disabledSkills: string[] = [];
   /** subId → 订阅句柄与目标 webContents，open 时建立，close/销毁时释放。 */
   private readonly subscriptions = new Map<string, { handle: OpenHandle; sender: WebContents }>();
 
@@ -70,7 +75,7 @@ export class Bridge {
       resolveProvider: resolveConfiguredProvider,
       compaction: true,
       permission: { mode: "default" },
-      skills: true,
+      skills: { disabled: this.disabledSkills },
       subagents: true,
       smallModel: true, // 摘要等杂活自动走便宜模型
       // 每次新建会话都据当前插件状态构建工具集：停用的内建工具移除、启用的 MCP 工具注入。
@@ -78,9 +83,18 @@ export class Bridge {
     });
   }
 
-  /** 启动时读取已保存的插件状态并连接已启用的 MCP，需在处理请求前调用。 */
+  /** 启动时发现文件系统技能、读取已保存的插件状态并连接已启用的 MCP，需在处理请求前调用。 */
   async init(): Promise<void> {
+    await this.plugins.refreshSkills(this.options.cwd);
     await this.plugins.setState(await this.readSavedPlugins());
+    this.syncDisabledSkills();
+  }
+
+  /** 把「被关闭的文件系统技能」同步进传给 agent 的稳定数组（原地更新，保持引用）。 */
+  private syncDisabledSkills(): void {
+    const names = this.plugins.disabledSkillNames();
+    this.disabledSkills.length = 0;
+    this.disabledSkills.push(...names);
   }
 
   register(ipcMain: IpcMain): void {
@@ -312,13 +326,18 @@ export class Bridge {
 
   private async setPluginEnabled(id: string, enabled: boolean): Promise<PluginEntry[]> {
     const manifest = PLUGIN_CATALOG.find((p) => p.id === id);
-    if (!manifest) throw new Error(t(`Unknown plugin: ${id}`, `未知插件: ${id}`));
+    // 文件系统技能（skill.fs.*）不在静态目录里，语义同 builtin（默认启用、可显式关闭）。
+    const isFsSkill = id.startsWith("skill.fs.");
+    if (!manifest && !isFsSkill) throw new Error(t(`Unknown plugin: ${id}`, `未知插件: ${id}`));
+    const builtin = isFsSkill ? true : Boolean(manifest?.builtin);
     const saved = await this.readSavedPlugins();
-    const next = applyPluginToggle(saved, id, enabled, Boolean(manifest.builtin));
+    const next = applyPluginToggle(saved, id, enabled, builtin);
     await fs.mkdir(path.dirname(this.options.pluginsFile), { recursive: true });
     await fs.writeFile(this.options.pluginsFile, JSON.stringify(next, null, 2), "utf8");
     // reconcile：连接新启用的 MCP / 断开停用的；工具集变化对新建会话生效。
     await this.plugins.setState(next);
+    // 技能开关同步进 agent 的 disabled 列表（对新建会话生效）。
+    this.syncDisabledSkills();
     return this.plugins.entriesWithStatus();
   }
 

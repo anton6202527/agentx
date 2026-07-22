@@ -8,9 +8,7 @@
 
 import { t } from "../i18n.js";
 import type { Provider } from "../types.js";
-import { AnthropicProvider } from "./anthropic.js";
 import { AuthStore } from "../auth/store.js";
-import { AnthropicOAuthTokenSource } from "../auth/token-source.js";
 import { DebugProvider } from "./debug.js";
 import { OpenAICompatProvider, type MaxTokensField } from "./openai-compat.js";
 
@@ -207,7 +205,6 @@ export function defaultAuthStore(): AuthStore {
 }
 
 const cloudDefaults: ProviderCapabilities = { tools: true, reasoning: false, images: false };
-const localDefaults: ProviderCapabilities = { tools: true, reasoning: false, images: false };
 
 function openAI(
   id: string,
@@ -220,101 +217,6 @@ function openAI(
 }
 
 const OPENAI_BUILTINS: OpenAICompatibleProviderRegistration[] = [
-  openAI("openai", "OpenAI", "https://api.openai.com/v1", "OPENAI_API_KEY", {
-    baseURLEnv: "OPENAI_BASE_URL",
-    streamUsage: true,
-    maxTokensField: "max_completion_tokens",
-    reasoningEffort: true,
-    capabilities: { ...cloudDefaults, images: true },
-    limits: { contextWindow: 128_000, maxOutputTokens: 16_000 },
-    models: [
-      {
-        pattern: "gpt-5*",
-        capabilities: { reasoning: true, images: true, tools: true },
-        limits: { contextWindow: 400_000, maxOutputTokens: 128_000 },
-        cost: { input: 1.25, output: 10, cacheRead: 0.125 },
-      },
-      { pattern: "o?*", capabilities: { reasoning: true } },
-    ],
-  }),
-  openAI("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", {
-    baseURLEnv: "OPENROUTER_BASE_URL",
-    streamUsage: true,
-    maxTokensField: "max_tokens",
-    reasoningEffort: false,
-    capabilities: cloudDefaults,
-    // OpenRouter 的 `:free` 变体是零成本的开放权重模型，只需一个免费 key，最适合调试。
-    catalog: [
-      {
-        model: "deepseek/deepseek-r1:free",
-        label: "DeepSeek R1（免费）",
-        free: true,
-        openWeight: true,
-        recommended: true,
-        note: "开放权重推理模型，OpenRouter 免费额度",
-      },
-      {
-        model: "meta-llama/llama-3.3-70b-instruct:free",
-        label: "Llama 3.3 70B Instruct（免费）",
-        free: true,
-        openWeight: true,
-      },
-      {
-        model: "qwen/qwen-2.5-72b-instruct:free",
-        label: "Qwen2.5 72B Instruct（免费）",
-        free: true,
-        openWeight: true,
-      },
-      {
-        model: "google/gemma-2-9b-it:free",
-        label: "Gemma 2 9B（免费）",
-        free: true,
-        openWeight: true,
-      },
-      {
-        model: "mistralai/mistral-7b-instruct:free",
-        label: "Mistral 7B Instruct（免费）",
-        free: true,
-        openWeight: true,
-      },
-    ],
-  }),
-  openAI("opencode", "OpenCode Zen", "https://opencode.ai/zen/v1", "OPENCODE_API_KEY", {
-    baseURLEnv: "OPENCODE_BASE_URL",
-    streamUsage: true,
-    maxTokensField: "max_tokens",
-    reasoningEffort: false,
-    capabilities: cloudDefaults,
-    // OpenCode Zen 的免费模型：需 OPENCODE_API_KEY（opencode 账号），无按量计费。名单会随平台轮换。
-    catalog: [
-      {
-        model: "big-pickle",
-        label: "Big Pickle（免费）",
-        free: true,
-        recommended: true,
-        note: "OpenCode Zen 免费",
-      },
-      { model: "mimo-v2.5-free", label: "MiMo V2.5（免费）", free: true, openWeight: true },
-      {
-        model: "deepseek-v4-flash-free",
-        label: "DeepSeek V4 Flash（免费）",
-        free: true,
-        openWeight: true,
-      },
-      { model: "north-mini-code-free", label: "North Mini Code（免费）", free: true },
-      {
-        model: "nemotron-3-ultra-free",
-        label: "Nemotron 3 Ultra（免费）",
-        free: true,
-        openWeight: true,
-      },
-      { model: "glm-4.7-free", label: "GLM-4.7（免费）", free: true, openWeight: true },
-      { model: "kimi-k2.5-free", label: "Kimi K2.5（免费）", free: true, openWeight: true },
-      { model: "minimax-m3-free", label: "MiniMax-M3（免费）", free: true, openWeight: true },
-      { model: "hy3-free", label: "Hy3（免费）", free: true },
-      { model: "grok-code", label: "Grok Code Fast（免费）", free: true },
-    ],
-  }),
   openAI("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", {
     baseURLEnv: "DEEPSEEK_BASE_URL",
     streamUsage: true,
@@ -359,279 +261,7 @@ const OPENAI_BUILTINS: OpenAICompatibleProviderRegistration[] = [
       },
     ],
   }),
-  openAI(
-    "gemini",
-    "Google Gemini (OpenAI compatibility)",
-    "https://generativelanguage.googleapis.com/v1beta/openai/",
-    ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-    {
-      baseURLEnv: "GEMINI_BASE_URL",
-      streamUsage: false,
-      maxTokensField: "max_tokens",
-      reasoningEffort: false,
-      capabilities: { ...cloudDefaults, images: true },
-      limits: { contextWindow: 128_000, maxOutputTokens: 16_000 },
-      models: [
-        {
-          pattern: "gemini-3.5-flash",
-          limits: { contextWindow: 1_048_576, maxOutputTokens: 65_536 },
-        },
-        {
-          pattern: "gemini-3.1-flash-lite",
-          limits: { contextWindow: 1_048_576, maxOutputTokens: 65_536 },
-        },
-        {
-          pattern: "gemini-2.5-flash*",
-          limits: { contextWindow: 1_048_576, maxOutputTokens: 65_536 },
-        },
-      ],
-      catalog: [
-        {
-          model: "gemini-3.5-flash",
-          label: "Gemini 3.5 Flash（免费层）",
-          free: true,
-          recommended: true,
-          note: "稳定版；免费层含输入与输出 token，适合 coding agent",
-        },
-        {
-          model: "gemini-3.1-flash-lite",
-          label: "Gemini 3.1 Flash-Lite（免费层）",
-          free: true,
-          note: "稳定版；免费层高吞吐、低延迟",
-        },
-        {
-          model: "gemini-2.5-flash-lite",
-          label: "Gemini 2.5 Flash-Lite（免费层）",
-          free: true,
-          note: "兼容备选；免费层含输入与输出 token",
-        },
-      ],
-    },
-  ),
-  openAI("xai", "xAI", "https://api.x.ai/v1", "XAI_API_KEY", {
-    baseURLEnv: "XAI_BASE_URL",
-    streamUsage: true,
-    maxTokensField: "max_tokens",
-    reasoningEffort: false,
-    capabilities: { ...cloudDefaults, images: true },
-    limits: { contextWindow: 128_000, maxOutputTokens: 16_000 },
-  }),
-  openAI("groq", "Groq", "https://api.groq.com/openai/v1", "GROQ_API_KEY", {
-    baseURLEnv: "GROQ_BASE_URL",
-    streamUsage: false,
-    maxTokensField: "max_tokens",
-    reasoningEffort: false,
-    capabilities: cloudDefaults,
-    // Groq 免费额度 + 开放权重模型，且推理极快，适合调试 agent loop。
-    catalog: [
-      {
-        model: "llama-3.3-70b-versatile",
-        label: "Llama 3.3 70B（Groq，免费额度）",
-        free: true,
-        openWeight: true,
-        recommended: true,
-        note: "免费额度、极快推理",
-      },
-      {
-        model: "llama-3.1-8b-instant",
-        label: "Llama 3.1 8B Instant（Groq）",
-        free: true,
-        openWeight: true,
-      },
-      {
-        model: "deepseek-r1-distill-llama-70b",
-        label: "DeepSeek R1 Distill 70B（Groq）",
-        free: true,
-        openWeight: true,
-      },
-      {
-        model: "gemma2-9b-it",
-        label: "Gemma 2 9B（Groq）",
-        free: true,
-        openWeight: true,
-      },
-    ],
-  }),
-  openAI("mistral", "Mistral AI", "https://api.mistral.ai/v1", "MISTRAL_API_KEY", {
-    baseURLEnv: "MISTRAL_BASE_URL",
-    streamUsage: false,
-    maxTokensField: "max_tokens",
-    reasoningEffort: false,
-    capabilities: cloudDefaults,
-  }),
-  openAI(
-    "together",
-    "Together AI",
-    "https://api.together.xyz/v1",
-    ["TOGETHER_API_KEY", "TOGETHER_AI_API_KEY"],
-    {
-      baseURLEnv: "TOGETHER_BASE_URL",
-      streamUsage: false,
-      maxTokensField: "max_tokens",
-      reasoningEffort: false,
-      capabilities: cloudDefaults,
-    },
-  ),
-  openAI(
-    "fireworks",
-    "Fireworks AI",
-    "https://api.fireworks.ai/inference/v1",
-    "FIREWORKS_API_KEY",
-    {
-      baseURLEnv: "FIREWORKS_BASE_URL",
-      streamUsage: false,
-      maxTokensField: "max_tokens",
-      reasoningEffort: false,
-      capabilities: cloudDefaults,
-    },
-  ),
-  openAI("cerebras", "Cerebras", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", {
-    baseURLEnv: "CEREBRAS_BASE_URL",
-    streamUsage: false,
-    maxTokensField: "max_tokens",
-    reasoningEffort: false,
-    capabilities: cloudDefaults,
-    catalog: [
-      {
-        model: "llama-3.3-70b",
-        label: "Llama 3.3 70B（Cerebras，免费额度）",
-        free: true,
-        openWeight: true,
-      },
-      {
-        model: "llama3.1-8b",
-        label: "Llama 3.1 8B（Cerebras）",
-        free: true,
-        openWeight: true,
-      },
-    ],
-  }),
-  openAI("ollama", "Ollama", "http://127.0.0.1:11434/v1", "OLLAMA_API_KEY", {
-    baseURLEnv: "OLLAMA_BASE_URL",
-    requiresApiKey: false,
-    local: true,
-    streamUsage: false,
-    maxTokensField: "max_tokens",
-    reasoningEffort: false,
-    capabilities: localDefaults,
-    // 本地推理：零成本、离线、开放权重。需先 `ollama pull <model>`。
-    catalog: [
-      {
-        model: "qwen2.5-coder",
-        label: "Qwen2.5 Coder（本地 Ollama）",
-        free: true,
-        openWeight: true,
-        recommended: true,
-        note: "本地代码模型，先 ollama pull qwen2.5-coder",
-      },
-      {
-        model: "llama3.2",
-        label: "Llama 3.2（本地 Ollama）",
-        free: true,
-        openWeight: true,
-      },
-      {
-        model: "deepseek-r1",
-        label: "DeepSeek R1（本地 Ollama）",
-        free: true,
-        openWeight: true,
-      },
-    ],
-  }),
-  openAI("lmstudio", "LM Studio", "http://127.0.0.1:1234/v1", "LMSTUDIO_API_KEY", {
-    aliases: ["lm-studio"],
-    baseURLEnv: "LMSTUDIO_BASE_URL",
-    requiresApiKey: false,
-    local: true,
-    streamUsage: false,
-    maxTokensField: "max_tokens",
-    reasoningEffort: false,
-    capabilities: localDefaults,
-  }),
-  openAI("vllm", "vLLM", "http://127.0.0.1:8000/v1", "VLLM_API_KEY", {
-    baseURLEnv: "VLLM_BASE_URL",
-    requiresApiKey: false,
-    local: true,
-    streamUsage: false,
-    maxTokensField: "max_tokens",
-    reasoningEffort: false,
-    capabilities: localDefaults,
-  }),
-  openAI("llamacpp", "llama.cpp", "http://127.0.0.1:8080/v1", "LLAMACPP_API_KEY", {
-    aliases: ["llama.cpp"],
-    baseURLEnv: "LLAMACPP_BASE_URL",
-    requiresApiKey: false,
-    local: true,
-    streamUsage: false,
-    maxTokensField: "max_tokens",
-    reasoningEffort: false,
-    capabilities: localDefaults,
-  }),
-  openAI(
-    "custom",
-    "Custom OpenAI-compatible",
-    "http://127.0.0.1:8000/v1",
-    "CUSTOM_OPENAI_API_KEY",
-    {
-      baseURLEnv: "CUSTOM_OPENAI_BASE_URL",
-      requiresApiKey: false,
-      local: true,
-      streamUsage: false,
-      maxTokensField: "max_tokens",
-      reasoningEffort: false,
-      capabilities: localDefaults,
-    },
-  ),
 ];
-
-install({
-  descriptor: descriptor({
-    id: "anthropic",
-    name: "Anthropic",
-    kind: "native",
-    protocol: "anthropic-messages",
-    baseURL: "https://api.anthropic.com",
-    baseURLEnv: "ANTHROPIC_BASE_URL",
-    apiKeyEnv: ["ANTHROPIC_API_KEY"],
-    requiresApiKey: true,
-    local: false,
-    capabilities: { tools: true, reasoning: false, images: true },
-    limits: { contextWindow: 200_000, maxOutputTokens: 32_000 },
-    models: [
-      // 价格（$/MTok）来自 Anthropic 官方价目（2026-06 快照）：Opus 4.x $5/$25、
-      // Sonnet $3/$15、Haiku 4.5 $1/$5；cache 读 0.1×、写 1.25× 用 estimateCostUSD 默认。
-      { pattern: "claude-haiku-*", cost: { input: 1, output: 5 } },
-      { pattern: "claude-sonnet-*", cost: { input: 3, output: 15 } },
-      { pattern: "claude-opus-*", cost: { input: 5, output: 25 } },
-      { pattern: "claude-opus-4-6*", capabilities: { reasoning: true } },
-      { pattern: "claude-opus-4-7*", capabilities: { reasoning: true } },
-      { pattern: "claude-opus-4-8*", capabilities: { reasoning: true } },
-      { pattern: "claude-sonnet-4-6*", capabilities: { reasoning: true } },
-      { pattern: "claude-sonnet-4-7*", capabilities: { reasoning: true } },
-      { pattern: "claude-sonnet-4-8*", capabilities: { reasoning: true } },
-    ],
-  }),
-  factory: () => {
-    const d = canonical.get("anthropic")!.descriptor;
-    const runtime = runtimeConfig(d);
-    const adaptiveThinking = (model: string) => resolveModelInfo(d, model).capabilities.reasoning;
-    // 优先 OAuth 订阅登录（Claude Pro/Max）：存在 oauth 凭证即走 Bearer + 自动续期，
-    // 无需 ANTHROPIC_API_KEY；否则回退环境变量里的 API key。
-    const oauth = defaultAuthStore().getSync("anthropic");
-    if (oauth && oauth.type === "oauth") {
-      return new AnthropicProvider({
-        tokenSource: new AnthropicOAuthTokenSource(defaultAuthStore(), "anthropic"),
-        ...(runtime.baseURL ? { baseURL: runtime.baseURL } : {}),
-        adaptiveThinking,
-      });
-    }
-    return new AnthropicProvider({
-      apiKey: runtime.apiKey,
-      ...(runtime.baseURL ? { baseURL: runtime.baseURL } : {}),
-      adaptiveThinking,
-    });
-  },
-});
 
 for (const builtin of OPENAI_BUILTINS) registerOpenAICompatibleProvider(builtin);
 
@@ -734,29 +364,11 @@ export function registerOpenAICompatibleProvider(
  * 未知 provider 返回 undefined（调用方回退到主模型）。
  */
 const SMALL_MODELS: Record<string, string> = {
-  anthropic: "anthropic/claude-haiku-4-5-20251001",
-  openai: "openai/gpt-5-mini",
-  openrouter: "openrouter/meta-llama/llama-3.3-70b-instruct",
   deepseek: "deepseek/deepseek-v4-flash",
-  gemini: "gemini/gemini-3.1-flash-lite",
-  xai: "xai/grok-3-mini",
-  groq: "groq/llama-3.1-8b-instant",
-  mistral: "mistral/mistral-small-latest",
-  cerebras: "cerebras/llama3.1-8b",
 };
 
 /** 未显式指定模型时，按凭证就绪状态挑选云端默认模型。 */
-const DEFAULT_MODEL_PREFERENCES = [
-  "deepseek/deepseek-v4-flash",
-  "opencode/big-pickle",
-  "openrouter/deepseek/deepseek-r1:free",
-  "groq/deepseek-r1-distill-llama-70b",
-  "openrouter/meta-llama/llama-3.3-70b-instruct:free",
-  "anthropic/claude-opus-4-8",
-  "openai/gpt-5",
-  "gemini/gemini-3.5-flash",
-  "xai/grok-3",
-] as const;
+const DEFAULT_MODEL_PREFERENCES = ["deepseek/deepseek-v4-flash"] as const;
 
 export function resolveDefaultModel(): string {
   for (const spec of DEFAULT_MODEL_PREFERENCES) {
@@ -971,8 +583,9 @@ function resolveSpec(spec: string): { entry: RegisteredProvider; model: string }
         ),
       );
   } else {
+    // 只剩 DeepSeek 一个云端 provider：裸模型名一律归到 deepseek。
     model = value;
-    prefix = value.startsWith("claude") ? "anthropic" : "openai";
+    prefix = "deepseek";
   }
   const entry = providers.get(prefix);
   if (!entry) {

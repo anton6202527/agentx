@@ -143,7 +143,7 @@ test("TUI 回归: Ctrl+U 删到行首只保留光标后内容", async () => {
   }
 });
 
-test("TUI 回归: PageUp 进入回看（有指示条），PageDown 回到底部", async () => {
+test("TUI 回归: PageUp/滚轮只回看结果区，输入框保持在固定行", async () => {
   const events: SessionEvent[] = [];
   for (let i = 0; i < 8; i++) {
     events.push({
@@ -157,11 +157,28 @@ test("TUI 回归: PageUp 进入回看（有指示条），PageDown 回到底部"
   const view = mount(host);
   await tick(100);
   try {
-    assert.doesNotMatch(view.lastFrame() ?? "", /回看历史中/);
+    const initial = view.lastFrame() ?? "";
+    assert.doesNotMatch(initial, /回看历史中/);
+    const inputRow = initial.split("\n").findIndex((line) => line.includes("输入需求开始"));
+    assert.ok(inputRow >= 0, `未找到输入框占位行：\n${initial}`);
+
     view.stdin.write("[5~"); // PageUp
     await tick(40);
     assert.match(view.lastFrame() ?? "", /回看历史中/);
     view.stdin.write("[6~"); // PageDown 回底
+    await tick(40);
+    assert.doesNotMatch(view.lastFrame() ?? "", /回看历史中/);
+
+    // xterm SGR 滚轮：向上进入内部回看，输入框仍停在同一个绝对行；向下回到底部。
+    view.stdin.write("\u001b[<64;10;10M".repeat(3));
+    await tick(40);
+    const scrolled = view.lastFrame() ?? "";
+    assert.match(scrolled, /回看历史中/);
+    assert.equal(
+      scrolled.split("\n").findIndex((line) => line.includes("输入需求开始")),
+      inputRow,
+    );
+    view.stdin.write("\u001b[<65;10;10M".repeat(3));
     await tick(40);
     assert.doesNotMatch(view.lastFrame() ?? "", /回看历史中/);
   } finally {
@@ -187,6 +204,48 @@ test("TUI 回归: 斜杠菜单滚轮移动高亮后 Enter 运行选中命令", a
     await tick(80);
     // 跑的是 sessions（列表标题），而不是 status。
     assert.match(view.lastFrame() ?? "", /会话列表|sessions/i);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("TUI 回归: 单条超长回复可按行滚动，不会把输入区推出屏幕", async () => {
+  const longReply = [
+    "HEAD_MARK",
+    ...Array.from({ length: 60 }, (_, i) => `结果行-${String(i).padStart(2, "0")}`),
+    "TAIL_MARK",
+  ].join("\n");
+  const host = makeHost({
+    eventsBeforeSnapshot: [
+      { type: "agent", event: { type: "user_message", text: "长回复", queued: false } },
+      { type: "agent", event: { type: "text", text: longReply } },
+      { type: "state", running: false },
+    ],
+  });
+  const view = mount(host);
+  await tick(100);
+  try {
+    const atBottom = view.lastFrame() ?? "";
+    assert.match(atBottom, /TAIL_MARK/);
+    assert.doesNotMatch(atBottom, /HEAD_MARK/);
+    const inputRow = atBottom.split("\n").findIndex((line) => line.includes("输入需求开始"));
+    assert.ok(inputRow >= 0);
+
+    view.stdin.write("\u001b[<64;10;10M".repeat(30));
+    await tick(40);
+    const atTop = view.lastFrame() ?? "";
+    assert.match(atTop, /HEAD_MARK/);
+    assert.doesNotMatch(atTop, /TAIL_MARK/);
+    assert.equal(
+      atTop.split("\n").findIndex((line) => line.includes("输入需求开始")),
+      inputRow,
+    );
+
+    view.stdin.write("\u001b[<65;10;10M".repeat(30));
+    await tick(40);
+    const backAtBottom = view.lastFrame() ?? "";
+    assert.match(backAtBottom, /TAIL_MARK/);
+    assert.doesNotMatch(backAtBottom, /回看历史中/);
   } finally {
     view.unmount();
   }

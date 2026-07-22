@@ -7,6 +7,7 @@
  */
 
 import { t } from "@anicode/core/i18n";
+import type { SkillMeta } from "@anicode/core";
 
 export type PluginCategory = "mcp" | "skill" | "tool";
 
@@ -34,6 +35,12 @@ export interface PluginManifest {
   mcpServer?: McpServerSpec;
   /** 需要的环境变量名（不含值）；缺失时 MCP 插件不会连接。 */
   requiresEnv?: readonly string[];
+  /** skill 类插件运行所需的可执行文件（frontmatter metadata.requires.bins）。 */
+  requiresBins?: readonly string[];
+  /** skill 依赖是否就绪（requiresBins 全在 PATH 上）；文件系统技能才有意义。 */
+  available?: boolean;
+  /** 来源：内置目录 vs 文件系统自动发现。 */
+  source?: "builtin" | "filesystem";
   /** 官方内建、随附即用。 */
   builtin?: boolean;
 }
@@ -184,6 +191,41 @@ export function mergePluginState(enabledIds: readonly string[]): PluginEntry[] {
     // builtin 未被显式关闭时默认启用；其余以保存的状态为准。
     enabled: manifest.builtin ? !enabled.has(`!${manifest.id}`) : enabled.has(manifest.id),
   }));
+}
+
+/** 文件系统自动发现的技能对应的插件 id。 */
+export function skillPluginId(name: string): string {
+  return `skill.fs.${name}`;
+}
+
+/**
+ * 把 core 发现的文件系统技能投影成市场条目。
+ * 语义同 builtin：默认启用（自动加载），用户可显式关闭（保存为 `!id`）。
+ * icon 用可用性区分，description 已由 core 截断。
+ */
+export function mergeSkillState(
+  enabledIds: readonly string[],
+  skills: readonly SkillMeta[],
+): PluginEntry[] {
+  const saved = new Set(enabledIds);
+  return skills.map((skill) => {
+    const id = skillPluginId(skill.name);
+    const available = skill.available !== false;
+    return {
+      id,
+      name: skill.name,
+      description: skill.description || t("(no description)", "（无描述）"),
+      category: "skill" as const,
+      author: t("Filesystem skill", "文件系统技能"),
+      icon: available ? "🧩" : "⚠️",
+      version: "—",
+      source: "filesystem" as const,
+      builtin: true, // 默认启用，可显式关闭
+      available,
+      ...(skill.requiresBins ? { requiresBins: skill.requiresBins } : {}),
+      enabled: !saved.has(`!${id}`),
+    };
+  });
 }
 
 /**

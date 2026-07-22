@@ -94,6 +94,19 @@ export function Marketplace({ plugins, onToggle }: Props) {
                 )}
               </div>
             ) : null}
+            {p.source === "filesystem" && p.requiresBins && p.requiresBins.length > 0 ? (
+              <div className={`plugin-status ${p.available ? "ok" : "err"}`}>
+                {p.available
+                  ? t(
+                      `● Ready · needs ${p.requiresBins.join(", ")}`,
+                      `● 就绪 · 需 ${p.requiresBins.join("、")}`,
+                    )
+                  : t(
+                      `● Unavailable · install ${p.requiresBins.join(", ")}`,
+                      `● 不可用 · 请安装 ${p.requiresBins.join("、")}`,
+                    )}
+              </div>
+            ) : null}
             {p.enabled && p.runtime ? (
               <div className={`plugin-status ${p.runtime.connected ? "ok" : "err"}`}>
                 {p.runtime.connected

@@ -430,16 +430,31 @@ export interface SessionLikeRow {
   model: string;
 }
 
+export interface SessionsOverlayOptions {
+  /** 当前筛选结果里的高亮索引。 */
+  index?: number;
+  /** 搜索框内容；筛选本身由调用方完成，浮层只负责回显。 */
+  filter?: string;
+  /** 当前已经打开的会话，用圆点标记。 */
+  currentId?: string;
+}
+
 export function buildSessionsOverlay(
   sessions: readonly SessionLikeRow[],
   termRows: number,
   termCols: number,
+  options: SessionsOverlayOptions = {},
 ): Sprite {
   const width = dialogWidth(termCols);
+  const height = fixedOverlayHeight(termRows, 18, 8);
+  const viewportHeight = Math.max(1, height - 7);
   const inner = width - 2 * PADX;
+  const index = Math.max(0, Math.min(options.index ?? 0, sessions.length - 1));
+  const filter = options.filter ?? "";
   const blank = () => line(width, []);
-  const bodyL = (spans: Span[]) => line(width, [PAD, ...spans]);
-  const bodyLR = (l: Span[], r: Span[]) => lineLR(width, [PAD, ...l], [...r, PAD]);
+  const bodyL = (spans: Span[], baseBg: string = DLG.bg) => line(width, [PAD, ...spans], baseBg);
+  const bodyLR = (l: Span[], r: Span[], baseBg: string = DLG.bg) =>
+    lineLR(width, [PAD, ...l], [...r, PAD], baseBg);
 
   const L: string[] = [];
   L.push(blank());
@@ -450,30 +465,73 @@ export function buildSessionsOverlay(
     ),
   );
   L.push(blank());
-  if (sessions.length === 0) {
-    L.push(bodyL([{ text: t("(no sessions)", "（暂无会话）"), fg: DLG.dim }]));
-  } else {
-    for (const s of sessions.slice(0, Math.max(4, termRows - 12))) {
-      const meta = ` ${s.title ?? t("(untitled)", "(无标题)")} · ${s.model}`;
-      const idW = dispWidth(s.id) + (s.running ? 4 : 0);
-      L.push(
-        bodyL([
-          { text: s.id, fg: DLG.ok },
-          ...(s.running ? [{ text: t(" ●running", " ●运行中"), fg: DLG.hlBg } as Span] : []),
-          { text: truncWidth(meta, Math.max(1, inner - idW)), fg: DLG.dim },
+  L.push(
+    filter
+      ? bodyL([
+          { text: filter, fg: DLG.text },
+          { text: " ", bg: DLG.accent },
+        ])
+      : bodyL([
+          { text: " ", bg: DLG.accent },
+          { text: t("Search sessions…", "搜索会话…"), fg: DLG.dim },
         ]),
-      );
-    }
-  }
+  );
   L.push(blank());
+
+  const content = sessions.map((s, sessionIndex) => {
+    const selected = sessionIndex === index;
+    const current = s.id === options.currentId;
+    const state = s.running ? t("running", "运行中") : current ? t("current", "当前") : "";
+    const prefix = `${current ? "●" : " "} ${s.title ?? t("(untitled)", "(无标题)")} · ${s.id}`;
+    const right = state || s.model;
+    const label = truncWidth(prefix, Math.max(1, inner - dispWidth(right) - 1));
+    return {
+      sessionIndex,
+      rendered: bodyLR(
+        [{ text: label, fg: selected ? DLG.hlFg : current ? DLG.ok : DLG.text, bold: selected }],
+        [{ text: right, fg: selected ? DLG.hlFg : s.running ? DLG.accent : DLG.dim }],
+        selected ? DLG.hlBg : DLG.bg,
+      ),
+    };
+  });
+  if (content.length === 0) {
+    content.push({
+      rendered: bodyL([
+        {
+          text: filter
+            ? t("(no matching sessions)", "（无匹配会话）")
+            : t("(no sessions)", "（暂无会话）"),
+          fg: DLG.dim,
+        },
+      ]),
+      sessionIndex: -1,
+    });
+  }
+  const win = scrollWindow(content, index, viewportHeight, () => ({
+    rendered: blank(),
+    sessionIndex: -1,
+  }));
+  L.push(...win.map((entry) => entry.rendered));
   L.push(
     bodyLR(
-      [{ text: t("/resume <id> load", "/resume <id> 载入"), fg: DLG.dim }],
-      [{ text: t("esc close", "esc 关闭"), fg: DLG.dim }],
+      [{ text: t("Enter open", "Enter 打开"), fg: DLG.dim }],
+      [{ text: t("↑↓ select", "↑↓ 选择"), fg: DLG.dim }],
     ),
   );
   L.push(blank());
-  return place(L, width, termRows, termCols);
+  return {
+    ...place(L, width, termRows, termCols),
+    hitRows: [
+      null,
+      null,
+      null,
+      null,
+      null,
+      ...win.map((entry) => (entry.sessionIndex >= 0 ? entry.sessionIndex : null)),
+      null,
+      null,
+    ],
+  };
 }
 
 /** 授权请求精灵。 */

@@ -27,6 +27,8 @@ export interface ConfigAgent {
   disallowedTools?: string[];
   model?: string;
   maxTurns?: number;
+  /** 编排型：保留 task 工具以便再往下派子 agent（受 MAX_SUBAGENT_DEPTH 深度上限约束）。 */
+  orchestrator?: boolean;
 }
 
 export interface AnicodeConfig {
@@ -328,5 +330,6 @@ export function toSubagentDefinitions(config: AnicodeConfig): SubagentDefinition
     ...(a.disallowedTools ? { disallowedTools: a.disallowedTools } : {}),
     ...(a.model ? { model: a.model } : {}),
     ...(a.maxTurns ? { maxTurns: a.maxTurns } : {}),
+    ...(a.orchestrator ? { orchestrator: true } : {}),
   }));
 }

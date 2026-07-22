@@ -51,7 +51,17 @@ export interface SubagentDefinition {
    * 多个此类 task 调用可被父 agent 并行 fan-out（对齐 opencode 的 explore/并行子代理）。
    */
   readOnly?: boolean;
+  /**
+   * 编排型：破例保留 task 工具，使其能再往下派子 agent（否则一律被剥离防递归）。
+   * 仅显式声明此项的类型才拥有嵌套委派能力；仍受 MAX_SUBAGENT_DEPTH 深度上限约束，
+   * 到达上限后即便是编排型也不再下发 task。用于 规划者→执行者→工人 这类多层协作模板。
+   */
+  orchestrator?: boolean;
 }
+
+/** 嵌套委派的深度上限：根 task 工具为 0，每下派一层编排型子 agent +1。
+ *  默认 2 支撑「主 → L1 编排 → L2 编排 → L3 工人」的三层链（对齐 Sisyphus/Atlas/Hephaestus）。 */
+export const MAX_SUBAGENT_DEPTH = 2;
 
 /** 内置通用类型：全工具、通用提示 —— 对齐 Claude Code 的 general-purpose */
 export const GENERAL_SUBAGENT: SubagentDefinition = {
@@ -108,6 +118,10 @@ export interface TaskToolOptions {
   defaultMaxTurns?: number;
   /** 继承父级 OS 沙箱策略，避免子 agent 的 bash 成为绕过沙箱的通道。 */
   sandbox?: AgentOptions["sandbox"];
+  /** 当前委派层级（根 task 工具为 0，每下派一层编排型子 agent +1）。内部用，勿手填。 */
+  depth?: number;
+  /** 嵌套委派深度上限；缺省 MAX_SUBAGENT_DEPTH。 */
+  maxDepth?: number;
 }
 
 export function createTaskTool(opts: TaskToolOptions): Tool {
@@ -201,7 +215,8 @@ export function createTaskTool(opts: TaskToolOptions): Tool {
       }
 
       // 工具收窄（派生权限）：
-      //   - 始终排除 task —— 子 agent 不能再派子 agent（防递归 / 上下文与费用失控）；
+      //   - 默认排除 task —— 子 agent 不能再派子 agent（防递归 / 上下文与费用失控）；
+      //     例外：def.orchestrator 型在深度预算内会在下方重新获得一个 depth+1 的嵌套 task；
       //   - 从「继承全部」的默认集里排除 todo_write —— 子 agent 的清单是隔离的、不展示给用户，
       //     只会污染进度流；显式 def.tools 指定了则尊重；
       //   - readOnly 型：进一步收窄到只读工具，保证「无写副作用」这一并行前提成立。
@@ -221,6 +236,15 @@ export function createTaskTool(opts: TaskToolOptions): Tool {
         base = base.filter((n) => !denied.some((pattern) => globMatch(pattern, n)));
       }
       const allowedNames = base.filter((n) => n !== "task");
+      const childTools = opts.tools.subset(allowedNames);
+      // 编排型子 agent 破例保留 task：注册一个 depth+1 的嵌套委派工具，使其能再往下派，
+      // 直到 maxDepth 上限后即便编排型也不再下发（防无限递归 / 上下文与费用失控）。
+      // 嵌套工具从同一份父全量工具集（opts.tools）子集化，故孙 agent 的工具面与子 agent 一致。
+      const depth = opts.depth ?? 0;
+      const maxDepth = opts.maxDepth ?? MAX_SUBAGENT_DEPTH;
+      if (def.orchestrator && depth < maxDepth) {
+        childTools.register(createTaskTool({ ...opts, depth: depth + 1 }));
+      }
       const child = opts.makeAgent({
         provider: resolved?.provider ?? opts.provider,
         model: resolved?.model ?? def.model ?? opts.model,
@@ -235,7 +259,7 @@ export function createTaskTool(opts: TaskToolOptions): Tool {
         system: def.system ?? subagentSystem(),
         // 子 agent 不重复采集环境（每次都 spawn git，量大时拖慢）；父会话已接地。
         injectEnv: false,
-        tools: opts.tools.subset(allowedNames),
+        tools: childTools,
         ...(opts.permission ? { permission: opts.permission } : {}),
         ...(opts.hooks?.length ? { hooks: opts.hooks } : {}),
         maxTurns: def.maxTurns ?? opts.defaultMaxTurns ?? 30,

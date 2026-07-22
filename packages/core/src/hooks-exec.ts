@@ -83,6 +83,9 @@ async function runCommandHook(
     timer.unref?.();
     child.stdout?.on("data", (b: Buffer) => (stdout += b.toString()));
     child.stderr?.on("data", (b: Buffer) => (stderr += b.toString()));
+    child.stdin?.on("error", () => {
+      // Hook may exit before consuming stdin; close/exit still carries the result.
+    });
     child.on("error", () => finish(undefined));
     child.on("close", (code) => {
       if (code === 2) {

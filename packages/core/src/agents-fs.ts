@@ -66,6 +66,7 @@ export function parseSubagentFile(filename: string, text: string): SubagentDefin
   const maxTurnsRaw = fmString(fm["maxTurns"] ?? fm["max-turns"]);
   const maxTurns = maxTurnsRaw !== undefined ? Number(maxTurnsRaw) : undefined;
   const readOnly = fmString(fm["readonly"] ?? fm["readOnly"]) === "true";
+  const orchestrator = fmString(fm["orchestrator"]) === "true";
   return {
     name,
     description,
@@ -75,5 +76,6 @@ export function parseSubagentFile(filename: string, text: string): SubagentDefin
     ...(model ? { model } : {}),
     ...(maxTurns !== undefined && Number.isFinite(maxTurns) && maxTurns > 0 ? { maxTurns } : {}),
     ...(readOnly ? { readOnly: true } : {}),
+    ...(orchestrator ? { orchestrator: true } : {}),
   };
 }

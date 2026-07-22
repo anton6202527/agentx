@@ -93,12 +93,18 @@ test("overlay: 会话列表与授权弹框定宽且含关键信息", () => {
     [{ id: "s_a", running: true, title: "会话A", model: "opus" }],
     30,
     80,
+    { index: 0, filter: "会话", currentId: "s_a" },
   );
   for (const l of sess.lines) assert.equal(visW(l), sess.width);
   const st = sess.lines.map(strip).join("\n");
   assert.match(st, /会话列表/);
   assert.match(st, /s_a/);
   assert.match(st, /会话A/);
+  assert.match(st, /会话/); // 搜索词回显
+  assert.ok(
+    sess.lines.some((l) => l.includes("48;2;246;177;122")),
+    "高亮会话应铺满背景",
+  );
 
   const perm = buildPermissionOverlay([{ toolName: "bash", ruleKey: "rm x" }], 30, 80);
   for (const l of perm.lines) assert.equal(visW(l), perm.width);

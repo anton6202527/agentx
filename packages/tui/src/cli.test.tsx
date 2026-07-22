@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerOpenAICompatibleProvider, type SessionHost } from "@anicode/core";
 import {
-  detectLocalModel,
+  enterTerminalScreen,
   parseArgs,
   resolveConfiguredProvider,
   resolveDefaultModel,
@@ -10,6 +10,23 @@ import {
   startRawModeWatchdog,
   validateArgs,
 } from "./cli.js";
+
+test("CLI: Ink 首帧前进入备用屏，退出时只恢复一次", () => {
+  const chunks: string[] = [];
+  const restore = enterTerminalScreen({
+    isTTY: true,
+    write(chunk) {
+      chunks.push(chunk);
+    },
+  });
+  assert.ok(chunks[0]?.startsWith("\u001b[?1049h\u001b[H"));
+  assert.ok(chunks.join("").includes("\u001b]11;#0a0a0a\u0007"));
+
+  restore();
+  restore();
+  assert.equal(chunks.filter((chunk) => chunk.includes("\u001b[?1049l")).length, 1);
+  assert.ok(chunks.join("").includes("\u001b[?1006l\u001b[?1000l"));
+});
 
 test("CLI: TUI 运行期间持续重申 raw mode，停止后不再改写终端", async () => {
   const calls: boolean[] = [];
@@ -147,34 +164,6 @@ test("CLI: 无 --model 时不硬耦合 ANTHROPIC_API_KEY，无凭证回退 debug
       else process.env[k] = v;
     }
   }
-});
-
-test("CLI: detectLocalModel 探测到 Ollama 时优先返回本地 DeepSeek 模型", async () => {
-  const okFetch = (async () =>
-    new Response(
-      JSON.stringify({ models: [{ name: "llama3.2:latest" }, { name: "deepseek-r1:latest" }] }),
-      {
-        status: 200,
-      },
-    )) as unknown as typeof fetch;
-  assert.equal(await detectLocalModel(okFetch), "ollama/deepseek-r1:latest");
-
-  // 无 deepseek → 用第一个本地模型
-  const noDeepseek = (async () =>
-    new Response(JSON.stringify({ models: [{ name: "qwen2.5-coder" }] }), {
-      status: 200,
-    })) as unknown as typeof fetch;
-  assert.equal(await detectLocalModel(noDeepseek), "ollama/qwen2.5-coder");
-
-  // 未运行 / 出错 → null（回退云端或 debug/demo）
-  const boom = (async () => {
-    throw new Error("connection refused");
-  }) as unknown as typeof fetch;
-  assert.equal(await detectLocalModel(boom), null);
-
-  const empty = (async () =>
-    new Response(JSON.stringify({ models: [] }), { status: 200 })) as unknown as typeof fetch;
-  assert.equal(await detectLocalModel(empty), null);
 });
 
 test("CLI: 本地 resolver 在建会话时给出缺凭证诊断，debug 始终可用", () => {

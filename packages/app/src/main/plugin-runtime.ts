@@ -13,13 +13,20 @@
 import {
   connectMcpServers,
   defaultTools,
+  discoverSkills,
   t,
   type McpClient,
   type McpServerConfig,
+  type SkillMeta,
   type Tool,
   type ToolRegistry,
 } from "@anicode/core";
-import { mergePluginState, type PluginEntry, type PluginRuntimeStatus } from "../shared/plugins.js";
+import {
+  mergePluginState,
+  mergeSkillState,
+  type PluginEntry,
+  type PluginRuntimeStatus,
+} from "../shared/plugins.js";
 
 export type McpConnector = (
   configs: McpServerConfig[],
@@ -32,6 +39,7 @@ interface Connection {
 
 export class PluginRuntime {
   private savedIds: string[] = [];
+  private skills: SkillMeta[] = [];
   private readonly connections = new Map<string, Connection>();
   private readonly status = new Map<string, PluginRuntimeStatus>();
 
@@ -40,6 +48,22 @@ export class PluginRuntime {
     private readonly env: NodeJS.ProcessEnv = process.env,
   ) {}
 
+  /** 扫描文件系统技能（全局 + 项目级），供市场展示与开关；失败静默保持空表。 */
+  async refreshSkills(cwd: string): Promise<void> {
+    try {
+      this.skills = await discoverSkills(cwd);
+    } catch {
+      this.skills = [];
+    }
+  }
+
+  /** 被用户显式关闭的文件系统技能名（供 agent 的 skills.disabled 排除）。 */
+  disabledSkillNames(): string[] {
+    return mergeSkillState(this.savedIds, this.skills)
+      .filter((e) => !e.enabled)
+      .map((e) => e.name);
+  }
+
   /** 更新已保存状态并 reconcile MCP 连接（连接新启用的、断开已停用的）。 */
   async setState(savedIds: readonly string[]): Promise<void> {
     this.savedIds = [...savedIds];
@@ -47,7 +71,7 @@ export class PluginRuntime {
   }
 
   private entries(): PluginEntry[] {
-    return mergePluginState(this.savedIds);
+    return [...mergePluginState(this.savedIds), ...mergeSkillState(this.savedIds, this.skills)];
   }
 
   private async reconcile(): Promise<void> {
