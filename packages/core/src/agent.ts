@@ -35,7 +35,12 @@ import { createBrowserTool, type BrowserToolOptions } from "./tools/browser.js";
 import type { LspPool } from "./lsp.js";
 import { Chan } from "./chan.js";
 import { HookRunner, type HookRegistration } from "./hooks.js";
-import { createTaskTool, type SubagentDefinition } from "./subagent.js";
+import {
+  createTaskTools,
+  TaskRegistry,
+  type SubagentDefinition,
+  type TaskRecord,
+} from "./subagent.js";
 import { discoverSkills, skillListPrompt, createSkillTool } from "./skills.js";
 import { discoverSubagents } from "./agents-fs.js";
 import {
@@ -70,6 +75,8 @@ export type AgentEvent =
   | { type: "compacted"; beforeTokens: number; afterTokens: number } // 上下文被压缩
   // 本轮开始前的工作区快照（供 undo/rewind）；messageCount = 本轮用户输入进入历史前的消息数
   | { type: "checkpoint"; id: string; tree: string; label: string; messageCount: number }
+  // 后台子 agent 任务完成通知已注入历史（模型将在下一轮看到并处理）
+  | { type: "task_notice"; text: string }
   // 整个 loop 结束，等待下一条用户输入；costUSD 为会话累计成本估算（模型无价格信息时缺省）
   | { type: "done"; usage: Usage; turns: number; costUSD?: number }
   | { type: "error"; message: string };
@@ -135,6 +142,12 @@ export interface AgentOptions {
    * 传对象可追加扫描目录（dirs）或按名排除技能（disabled，供 UI 开关）。默认关。
    */
   skills?: boolean | { dirs?: string[]; disabled?: string[] };
+  /**
+   * 后台子 agent 任务在 Agent 空闲时完成的通知出口：宿主（如 SessionManager）
+   * 用它自动发起一次 drive 把通知交给模型处理。不设时通知积压在 Agent 内部，
+   * 下一次 send 开始时注入。运行中完成的通知不走此回调（直接在 turn 边界注入）。
+   */
+  onTaskNotice?: (text: string) => void;
   maxTurns?: number;
   maxTokens?: number;
   /**
@@ -363,6 +376,13 @@ export class Agent {
   private acceptingQueuedInput = false; // done/error 已决定后关闭，避免收尾窗口吞消息
   private queued: string[] = []; // steering：运行中追加的用户输入，turn 边界注入
   private readonly parallelInputsStable: boolean;
+  /** 后台子 agent 任务注册表（启用 subagents 后由 registerTaskTool 填充）。 */
+  private taskRegistry: TaskRegistry | null = null;
+  /** drive 运行中到达的任务完成通知：turn 边界作为 internal user 注入。 */
+  private noticeQueue: string[] = [];
+  /** 空闲时到达且无 onTaskNotice 出口的通知：下一次 send 开始时注入。 */
+  private pendingTaskNotices: string[] = [];
+  private readonly onTaskNoticeCb?: (text: string) => void;
 
   constructor(opts: AgentOptions) {
     this.provider = opts.provider;
@@ -417,6 +437,7 @@ export class Agent {
     this.modelInfoOpt = opts.modelInfo;
     this.permissionOpt = opts.permission;
     this.hooksOpt = opts.hooks ?? [];
+    if (opts.onTaskNotice) this.onTaskNoticeCb = opts.onTaskNotice;
     this.fallbackModels = opts.fallbackModels ?? [];
     this.compaction = this.resolveCompaction(opts.compaction, opts.modelInfo);
     this.persist = opts.persistence ?? null;
@@ -501,23 +522,54 @@ export class Agent {
     const childHooks = this.hooksOpt.filter(
       (hook) => hook.event === "PreToolUse" || hook.event === "PostToolUse",
     );
-    this.tools.register(
-      createTaskTool({
-        makeAgent: (o) => new Agent(o),
-        provider: this.provider,
-        model: this.model,
-        ...(this.modelInfoOpt ? { modelInfo: this.modelInfoOpt } : {}),
-        ...(this.resolveModelFn ? { resolveModel: this.resolveModelFn } : {}),
-        cwd: this.cwd,
-        tools: this.tools,
-        ...(this.sandbox ? { sandbox: this.sandbox } : {}),
-        ...(this.permissionOpt ? { permission: this.permissionOpt } : {}),
-        ...(childHooks.length > 0 ? { hooks: childHooks } : {}),
-        // SubagentStart/Stop 属父级生命周期事件，经父 HookRunner 触发（不下发给子 agent）。
-        parentHooks: this.hooks,
-        ...(definitions.length > 0 ? { definitions } : {}),
-      }),
-    );
+    const registry = new TaskRegistry();
+    this.taskRegistry = registry;
+    const taskTools = createTaskTools({
+      makeAgent: (o) => new Agent(o),
+      provider: this.provider,
+      model: this.model,
+      ...(this.modelInfoOpt ? { modelInfo: this.modelInfoOpt } : {}),
+      ...(this.resolveModelFn ? { resolveModel: this.resolveModelFn } : {}),
+      cwd: this.cwd,
+      tools: this.tools,
+      ...(this.sandbox ? { sandbox: this.sandbox } : {}),
+      ...(this.permissionOpt ? { permission: this.permissionOpt } : {}),
+      ...(childHooks.length > 0 ? { hooks: childHooks } : {}),
+      // SubagentStart/Stop 属父级生命周期事件，经父 HookRunner 触发（不下发给子 agent）。
+      parentHooks: this.hooks,
+      ...(definitions.length > 0 ? { definitions } : {}),
+      registry,
+      notifyTaskDone: (text) => this.deliverTaskNotice(text),
+    });
+    for (const tool of taskTools.all) this.tools.register(tool);
+  }
+
+  /**
+   * 后台任务完成通知的三级投递：
+   *   1) drive 运行中 → noticeQueue，最近的 turn 边界注入（模型当轮即可处理）；
+   *   2) 空闲且宿主给了出口 → onTaskNotice（SessionManager 用它自动发起新 drive）；
+   *   3) 兜底 → pendingTaskNotices，下一次 send 开始时注入。
+   */
+  private deliverTaskNotice(text: string): void {
+    if (this.running && this.acceptingQueuedInput) {
+      this.noticeQueue.push(text);
+      return;
+    }
+    if (this.onTaskNoticeCb) {
+      this.onTaskNoticeCb(text);
+      return;
+    }
+    this.pendingTaskNotices.push(text);
+  }
+
+  /** 后台子 agent 任务一览（UI/宿主观测用）。 */
+  get backgroundTasks(): readonly TaskRecord[] {
+    return this.taskRegistry?.list() ?? [];
+  }
+
+  /** 停止全部运行中的后台子 agent 任务（会话销毁/删除时调用）。返回停掉的数量。 */
+  stopBackgroundTasks(): number {
+    return this.taskRegistry?.stopAll() ?? 0;
   }
 
   // ---------- 只读访问 ----------
@@ -718,6 +770,10 @@ export class Agent {
       this.acceptingQueuedInput = false;
       this.queued = [];
       this.running = false;
+      // drive 收尾窗口到达、没赶上 turn 边界的任务通知：改走空闲投递（回调或积压）。
+      const leftover = this.noticeQueue;
+      this.noticeQueue = [];
+      for (const text of leftover) this.deliverTaskNotice(text);
     }
   }
 
@@ -756,6 +812,12 @@ export class Agent {
       return;
     }
     yield* this.pushUser(userText, false, prepared.additionalContext);
+    // 上一轮空闲期积压的后台任务完成通知：随本轮主输入一并交给模型。
+    if (this.pendingTaskNotices.length > 0) {
+      this.noticeQueue.unshift(...this.pendingTaskNotices);
+      this.pendingTaskNotices = [];
+      yield* this.drainNotices();
+    }
     await this.flushPersist();
     // 主输入已经正式进入历史，从这里开始同一 drive 才可接受 steering。
     // interrupt 可能发生在异步 hook / 持久化期间；closing 不得重新回到 active。
@@ -839,6 +901,14 @@ export class Agent {
 
       const calls = toolCallsOf(outcome.message);
       if (outcome.stopReason !== "tool_use" || calls.length === 0) {
+        // 后台任务在模型收尾前完成 → 通知注入并继续 loop（模型当轮消化结果）
+        if (this.noticeQueue.length > 0) {
+          const n = yield* this.drainNotices();
+          if (n > 0) {
+            await this.flushPersist();
+            continue;
+          }
+        }
         // steering 队列非空 → 注入并继续 loop（模型收尾了但用户还有话说）
         if (this.queued.length > 0) {
           const added = yield* this.drainQueued();
@@ -887,7 +957,11 @@ export class Agent {
         yield { type: "error", message: "会话已中断" };
         return;
       }
-      // 工具轮之后是注入 steering 的天然边界
+      // 工具轮之后是注入 steering / 任务通知的天然边界
+      if (this.noticeQueue.length > 0) {
+        const n = yield* this.drainNotices();
+        if (n > 0) await this.flushPersist();
+      }
       if (this.queued.length > 0) {
         const added = yield* this.drainQueued();
         if (added > 0) await this.flushPersist();
@@ -933,6 +1007,18 @@ export class Agent {
       blocked: false,
       ...(h.additionalContext ? { additionalContext: h.additionalContext } : {}),
     };
+  }
+
+  /** 把积压的后台任务完成通知注入历史（internal user，不过 UserPromptSubmit hook）。 */
+  private *drainNotices(): Generator<AgentEvent, number> {
+    let added = 0;
+    while (this.noticeQueue.length > 0) {
+      const text = this.noticeQueue.shift()!;
+      this.pushInternalUser(text);
+      yield { type: "task_notice", text };
+      added++;
+    }
+    return added;
   }
 
   private async *drainQueued(): AsyncGenerator<AgentEvent, number> {

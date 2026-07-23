@@ -55,6 +55,12 @@ function scriptedProvider(scripts: ChatMessage[][]): Provider {
 
 const tick = (ms = 60) => new Promise((r) => setTimeout(r, ms));
 
+/** 轮询等待帧内容满足条件（默认 3s 超时）——比固定 tick 抗环境时序漂移。 */
+async function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond() && Date.now() < deadline) await tick(25);
+}
+
 const zeroUsage = {
   inputTokens: 0,
   outputTokens: 0,
@@ -178,13 +184,14 @@ test("TUI: 键入 → 授权 → 文件落盘 → 渲染（走 SessionHost）", 
   for (const ch of "写个 note.txt") stdin.write(ch);
   await tick();
   stdin.write("\r");
-  await tick(100);
+  // 环境接地（git spawn 等）会拖慢首轮，固定 tick 不够稳 —— 轮询等授权弹窗。
+  await waitFor(() => /授权请求/.test(lastFrame() ?? ""));
 
   assert.match(lastFrame() ?? "", /授权请求/);
   assert.match(lastFrame() ?? "", /write/);
 
   stdin.write("y"); // 批准
-  await tick(150);
+  await waitFor(() => /完成，已写入/.test(lastFrame() ?? ""));
 
   assert.equal(await fs.readFile(path.join(dir, "note.txt"), "utf8"), "hello");
   const frame = lastFrame() ?? "";

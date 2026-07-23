@@ -547,3 +547,80 @@ test("SessionManager.autoTitle: 首轮后用模型起标题、持久化并广播
 
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+test("SessionManager: 后台任务空闲期完成 → 自动发起 drive 消化通知", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "anicode-sm-bg-"));
+  let parentTurn = 0;
+  let releaseChild!: () => void;
+  const childGate = new Promise<void>((r) => (releaseChild = r));
+  const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+
+  // 子 agent 请求的辨识：它的用户消息文本就是 task prompt（"去干"）。
+  const provider: Provider = {
+    name: "p",
+    async *stream(req): AsyncIterable<StreamEvent> {
+      const isChild = req.messages.some((m) =>
+        m.content.some((p) => p.type === "text" && p.text === "去干"),
+      );
+      if (isChild) {
+        await childGate;
+        yield {
+          type: "done",
+          stopReason: "end_turn",
+          message: { role: "assistant", content: [{ type: "text", text: "孩子结论Z" }] },
+          usage: zero,
+        };
+        return;
+      }
+      const turn = parentTurn++;
+      const content =
+        turn === 0
+          ? [
+              {
+                type: "tool_call" as const,
+                id: "c1",
+                name: "task",
+                args: { description: "后台活", prompt: "去干", background: true },
+              },
+            ]
+          : [{ type: "text" as const, text: `轮${turn}` }];
+      yield {
+        type: "done",
+        stopReason: turn === 0 ? "tool_use" : "end_turn",
+        message: { role: "assistant", content },
+        usage: zero,
+      };
+    },
+  };
+
+  const m = new SessionManager({
+    store: new SessionStore(path.join(dir, "sessions")),
+    resolveProvider: () => ({ provider, model: "p" }),
+    subagents: true,
+    permission: { mode: "auto" },
+  });
+  const s = await m.createSession({ cwd: dir, model: "p" });
+  const events: SessionEvent[] = [];
+  await m.open(s.id, (ev) => events.push(ev));
+  await m.send(s.id, "开始");
+  assert.equal(parentTurn, 2, "第一次 drive 结束（task 立即返回 + 收尾轮）");
+
+  // 会话空闲后子任务才完成 → onTaskNotice → 自动 send 通知 → 第二次 drive
+  releaseChild();
+  const deadline = Date.now() + 3000;
+  while (parentTurn < 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(parentTurn, 3, "应自动发起第二次 drive");
+  const notif = events.find(
+    (e) =>
+      e.type === "agent" &&
+      e.event.type === "user_message" &&
+      e.event.text.startsWith("<task-notification"),
+  );
+  assert.ok(notif, "自动 drive 的输入应是通知信封");
+  assert.ok(
+    events.filter((e) => e.type === "state" && (e as any).running === true).length >= 2,
+    "至少两次 running 状态（手动 + 自动）",
+  );
+  m.dispose();
+  await fs.rm(dir, { recursive: true, force: true });
+});

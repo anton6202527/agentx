@@ -26,6 +26,13 @@ export function messagesToItems(messages: readonly ChatMessage[]): Item[] {
   for (const m of messages) {
     for (const part of m.content) {
       if (part.type === "text" && !part.internal) {
+        // 后台任务完成通知（SessionManager 自动 drive 的 user 消息）：resume 还原时
+        // 收敛成一行 info，与实时渲染一致；全文本来就只是给模型看的。
+        if (m.role === "user" && part.text.startsWith("<task-notification")) {
+          const head = part.text.split("\n").find((l) => l && !l.startsWith("<")) ?? "";
+          items.push({ kind: "info", text: `◆ ${head}` });
+          continue;
+        }
         items.push({ kind: m.role === "user" ? "user" : "assistant", text: part.text });
       } else if (part.type === "tool_call") {
         const item: Extract<Item, { kind: "tool" }> = {

@@ -164,8 +164,21 @@ function applyEvent(dispatch: React.Dispatch<Action>, se: SessionEvent): void {
   switch (ev.type) {
     case "user_message":
       dispatch({ t: "flushLive" });
+      // 后台任务完成通知（自动 drive 的 user 消息）：收敛成一行 info（与 TUI/restore 一致）。
+      if (ev.text.startsWith("<task-notification")) {
+        const head = ev.text.split("\n").find((l) => l && !l.startsWith("<")) ?? "";
+        dispatch({ t: "push", item: { kind: "info", text: `◆ ${head}` } });
+        break;
+      }
       dispatch({ t: "push", item: { kind: "user", text: ev.text } });
       break;
+    case "task_notice": {
+      // 运行中注入的后台任务完成通知：一行 info 摘要（全文只给模型看）。
+      dispatch({ t: "flushLive" });
+      const head = ev.text.split("\n").find((l) => l && !l.startsWith("<")) ?? "";
+      dispatch({ t: "push", item: { kind: "info", text: `◆ ${head}` } });
+      break;
+    }
     case "text":
       dispatch({ t: "live", delta: ev.text });
       break;

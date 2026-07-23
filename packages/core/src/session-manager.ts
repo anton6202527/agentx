@@ -352,6 +352,11 @@ class ManagedSession {
     }
   }
 
+  /** 停止本会话全部后台子 agent 任务（删除/宿主销毁时用；普通 interrupt 不动它们）。 */
+  stopBackgroundTasks(): number {
+    return this.agent.stopBackgroundTasks();
+  }
+
   interrupt(): void {
     // 必须先同步关闭 Agent 的 steering 门，再广播 abort。AbortSignal listener
     // 可能同步重入 send；该消息应排入下一 drive，而非注入即将终止的本轮。
@@ -708,6 +713,7 @@ export class SessionManager {
   async deleteSession(sessionId: string): Promise<void> {
     const live = this.sessions.get(sessionId);
     if (live) {
+      live.stopBackgroundTasks();
       live.interrupt();
       this.sessions.delete(sessionId);
     }
@@ -735,7 +741,10 @@ export class SessionManager {
 
   /** 进程内宿主销毁时停止所有 live drive；daemon 断开客户端不会调用此方法。 */
   dispose(): void {
-    for (const session of this.sessions.values()) session.interrupt();
+    for (const session of this.sessions.values()) {
+      session.stopBackgroundTasks();
+      session.interrupt();
+    }
     for (const pool of this.lspPools) pool.closeAll();
     this.lspPools.clear();
   }
@@ -781,6 +790,11 @@ export class SessionManager {
       const agent = new Agent({
         provider: resolved.provider,
         model: resolved.model,
+        // 后台子 agent 在会话空闲时完成 → 自动发起一次 drive 让模型消化通知
+        // （运行中完成的通知由 Agent 在 turn 边界注入，不经此回调）。
+        onTaskNotice: (text) => {
+          void session.send(text).catch(() => {});
+        },
         ...(resolved.modelInfo ? { modelInfo: resolved.modelInfo } : {}),
         resolveModel: this.opts.resolveProvider,
         ...(this.smallModelSpec(resolved) ? { smallModel: this.smallModelSpec(resolved)! } : {}),

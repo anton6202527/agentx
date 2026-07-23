@@ -70,10 +70,15 @@ export {
 } from "./hooks.js";
 export {
   createTaskTool,
+  createTaskTools,
+  TaskRegistry,
   GENERAL_SUBAGENT,
   EXPLORE_SUBAGENT,
   type SubagentDefinition,
   type TaskToolOptions,
+  type TaskTools,
+  type TaskRecord,
+  type TaskStatus,
 } from "./subagent.js";
 export { Chan } from "./chan.js";
 export { discoverSkills, skillListPrompt, createSkillTool, type SkillMeta } from "./skills.js";

@@ -2153,6 +2153,13 @@ function handleEvent(
   switch (ev.type) {
     case "user_message":
       dispatch({ t: "flushLive" });
+      // 空闲期后台任务完成通知（SessionManager 自动 drive）：收敛成一行 info，
+      // 不当成用户长消息渲染（全文已进模型历史）。
+      if (ev.text.startsWith("<task-notification")) {
+        const head = ev.text.split("\n").find((l) => l && !l.startsWith("<")) ?? "";
+        dispatch({ t: "push", item: { kind: "info", text: `◆ ${head}` } });
+        break;
+      }
       dispatch({ t: "push", item: { kind: "user", text: ev.text } });
       break;
     case "text":
@@ -2233,6 +2240,16 @@ function handleEvent(
         },
       });
       break;
+    case "task_notice": {
+      // 后台任务完成通知已注入历史；给用户一行摘要（首行含任务名与成败）。
+      dispatch({ t: "flushLive" });
+      const head = ev.text.split("\n").find((l) => l && !l.startsWith("<")) ?? "";
+      dispatch({
+        t: "push",
+        item: { kind: "info", text: t(`◆ ${head}`, `◆ ${head}`) },
+      });
+      break;
+    }
     case "done":
       dispatch({ t: "flushLive" });
       dispatch({
