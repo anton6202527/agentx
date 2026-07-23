@@ -139,7 +139,19 @@ function applyEvent(se: SessionEvent): void {
   switch (ev.type) {
     case "user_message":
       flushLive();
+      // 后台任务完成通知（自动 drive 的 user 消息）：收敛成一行 info（与 TUI/restore 一致）。
+      if (ev.text.startsWith("<task-notification")) {
+        state.items.push({ kind: "info", text: `◆ ${noticeHead(ev.text)}` });
+        render();
+        break;
+      }
       state.items.push({ kind: "user", text: ev.text });
+      render();
+      break;
+    case "task_notice":
+      // 运行中注入的后台任务完成通知：一行 info 摘要（全文只给模型看）。
+      flushLive();
+      state.items.push({ kind: "info", text: `◆ ${noticeHead(ev.text)}` });
       render();
       break;
     case "text":
@@ -386,6 +398,11 @@ function submit(): void {
   textarea.value = "";
   autoGrow();
   post({ type: "send", text });
+}
+
+/** 通知信封的首个内容行（跳过 <task-notification> 标记）作为一行摘要。 */
+function noticeHead(text: string): string {
+  return text.split("\n").find((l) => l && !l.startsWith("<")) ?? "";
 }
 
 function autoGrow(): void {

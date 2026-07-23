@@ -239,6 +239,12 @@ registerOpenAICompatibleProvider({
 - 模型能力驱动请求：按 profile 控制 tools、reasoning、输出上限和 compaction 阈值；未知兼容模型不会被强塞 16k 输出参数。
 - 子 agent 的 `provider/model` override 会重新解析 provider，不再错误复用父 provider。
 - 默认工具：`read / write / edit / apply_patch / glob / grep / bash / bash_output / kill_shell / webfetch / todo_write / task / skill`；配置 LSP 后追加 `diagnostics`。
+- **多 agent 编排**（对齐 Claude Code 的 Agent/SendMessage/TaskOutput/TaskStop 收敛形态）：
+  - `task` 委派子任务（内置 `general`/`explore` + 文件/配置自定义类型）；只读型可并行 fan-out；`orchestrator` 型可嵌套下派（深度硬顶）。
+  - `task(background=true)` 后台运行：立即返回任务 id，父 agent 继续干活；完成时 `<task-notification>` 在 turn 边界注入（运行中）或由 SessionManager 自动发起一次 drive（空闲时）——主 agent 不用轮询。
+  - `task_send` 给既有子 agent 发后续消息（上下文完整保留，追问/迭代）；`task_output` 查状态/活动/结论；`task_stop` 终止。
+  - `task(isolation="worktree")` 在 detached git worktree 副本中运行：多个写任务并行互不冲突；无改动自动清理，有改动保留路径由父 agent 合并。
+  - 硬性上限（防失控）：嵌套深度、单会话 spawn 总量、后台并发；子 agent 结论过滤通知信封标记（防伪装宿主控制信息）。agent 间 peer 通信刻意不做（对齐 opencode not-planned / Claude Code 实验 flag 的取舍）。
 - **后台长时命令**：`bash(run_in_background)` 立即返回 shell id 不阻塞，`bash_output` 增量读取新输出（可选正则 filter），`kill_shell` 停止 —— dev server / watch 构建 / 日志跟随不再被 120s 超时打死。增量读取（读过即清）、有界缓冲、自动回收、宿主退出收尸，且**不主动往上下文塞提醒**，规避 Claude Code 后台任务刷爆上下文的已知坑。后台与前台共用同一套 OS 沙箱，绝非绕过通道。见 `tools/shells.ts`。
 - **多模态 read**：`read` 可读图片（png/jpg/gif/webp），模型支持视觉时经 `ctx.attachImage` 把图片本体附在本轮 tool_result 之后送入同一条 user 消息；不支持视觉/超 3.7MB 时如实降级为文本说明。两端 provider 映射（Anthropic `image` 块 / OpenAI `image_url`）已实测通过，无需改 provider。见 `tools/fs.ts`、`tools/tool.ts` 的 `ToolContext.attachImage`。
 - **repo map**：会话开始时按 token 预算注入关键文件与顶层符号签名，基于跨文件引用词频排序，减少首次定位时的盲目检索。
