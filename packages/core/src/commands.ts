@@ -61,13 +61,14 @@ async function readDir(dir: string): Promise<{ name: string; file: string }[]> {
 }
 
 export async function loadCommands(
-  opts: { cwd?: string; home?: string } = {},
+  opts: { cwd?: string; home?: string; extraDirs?: string[] } = {},
 ): Promise<CustomCommand[]> {
   const cwd = opts.cwd ?? process.cwd();
   const home = opts.home ?? os.homedir();
-  // 后加入的覆盖先加入的同名项 → 全局在前、项目在后。
+  // 后加入的覆盖先加入的同名项 → 全局在前、插件居中、项目在后。
   const dirs = [
     path.join(home, ".config", "anicode", "command"),
+    ...(opts.extraDirs ?? []),
     path.join(cwd, ".anicode", "command"),
   ];
   const byName = new Map<string, CustomCommand>();

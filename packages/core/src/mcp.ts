@@ -233,11 +233,13 @@ export class McpClient {
   }
 }
 
-// ---------- stdio 传输（Content-Length 分帧）----------
+// ---------- stdio 传输（MCP 规范：换行分隔 JSON，消息内不得含裸换行）----------
+// 注意不是 LSP 的 Content-Length 分帧 —— 官方 SDK server 全部按行读写，
+// 曾经的 Content-Length 实现对接任何真实 server 都会握手失败。
 
 class StdioTransport implements McpTransport {
   private proc: ChildProcessWithoutNullStreams;
-  private buffer = Buffer.alloc(0);
+  private buffer = "";
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   onNotification?: (method: string, params: unknown) => void;
@@ -300,28 +302,18 @@ class StdioTransport implements McpTransport {
   }
 
   private writeFrame(obj: unknown): void {
-    const body = Buffer.from(JSON.stringify(obj), "utf8");
-    const header = Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, "ascii");
-    this.proc.stdin.write(Buffer.concat([header, body]));
+    // JSON.stringify 不会产出裸换行（字符串内换行是 \n 转义），满足单行约束。
+    this.proc.stdin.write(JSON.stringify(obj) + "\n");
   }
 
   private onData(chunk: Buffer): void {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-    while (true) {
-      const sep = this.buffer.indexOf("\r\n\r\n");
-      if (sep < 0) return;
-      const header = this.buffer.subarray(0, sep).toString("ascii");
-      const m = /Content-Length:\s*(\d+)/i.exec(header);
-      if (!m) {
-        this.buffer = this.buffer.subarray(sep + 4);
-        continue;
-      }
-      const len = Number(m[1]);
-      const start = sep + 4;
-      if (this.buffer.length < start + len) return;
-      const body = this.buffer.subarray(start, start + len).toString("utf8");
-      this.buffer = this.buffer.subarray(start + len);
-      this.handleMessage(body);
+    this.buffer += chunk.toString("utf8");
+    let nl: number;
+    while ((nl = this.buffer.indexOf("\n")) >= 0) {
+      const line = this.buffer.slice(0, nl).replace(/\r$/, "").trim();
+      this.buffer = this.buffer.slice(nl + 1);
+      // 非 JSON 行（server 把日志误写到 stdout）静默跳过，handleMessage 已容错。
+      if (line) this.handleMessage(line);
     }
   }
 

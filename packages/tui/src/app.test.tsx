@@ -235,10 +235,10 @@ test("TUI: 工具被拒绝后以最终状态追加，不被错误结果覆盖", 
 
   for (const ch of "写文件") view.stdin.write(ch);
   view.stdin.write("\r");
-  await tick(100);
+  await waitFor(() => /授权请求/.test(view.lastFrame() ?? ""));
   assert.match(view.lastFrame() ?? "", /授权请求/);
   view.stdin.write("n");
-  await tick(150);
+  await waitFor(() => /⊘\s+write/.test(view.lastFrame() ?? ""));
 
   const frame = view.lastFrame() ?? "";
   assert.match(frame, /⊘\s+write/);

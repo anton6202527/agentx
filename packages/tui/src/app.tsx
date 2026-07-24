@@ -227,6 +227,10 @@ function builtinCommands(): CommandMenuRow[] {
       description: t("Show current session, model and directory", "显示当前会话、模型与目录"),
     },
     {
+      name: "tasks",
+      description: t("List background subagent tasks", "列出后台子 agent 任务"),
+    },
+    {
       name: "providers",
       description: t("List providers and credential hints", "列出 provider 及凭证提示"),
     },
@@ -279,6 +283,17 @@ function builtinCommands(): CommandMenuRow[] {
       description: t(
         "Analyze this repo and generate AGENTS.md project memory",
         "分析当前仓库并生成 AGENTS.md 项目记忆",
+      ),
+    },
+    {
+      name: "diff",
+      description: t("Show working tree changes (incl. untracked)", "查看工作区改动（含未跟踪）"),
+    },
+    {
+      name: "review",
+      description: t(
+        "Code review: /review [uncommitted|branch <base>|commit <sha>|<custom>]",
+        "代码审查：/review [uncommitted|branch <base>|commit <sha>|自定义指令]",
       ),
     },
     {
@@ -858,7 +873,47 @@ export function App({
         dispatch({ t: "push", item: { kind: "info", text: helpText() } });
         return true;
       }
+      if (cmd === "tasks") {
+        // 临时 open 拿一份新鲜 snapshot（含后台任务摘要）；本地/daemon 两种宿主通吃。
+        const handle = await host.open(state.meta.id, () => {});
+        handle.close();
+        const tasks = handle.snapshot.backgroundTasks ?? [];
+        dispatch({
+          t: "push",
+          item: {
+            kind: "info",
+            text: tasks.length
+              ? tasks
+                  .map(
+                    (task) =>
+                      `${task.id} [${task.status}] ${task.type} · ${task.description}` +
+                      (task.worktree ? ` (worktree: ${task.worktree})` : ""),
+                  )
+                  .join("\n")
+              : t("No background tasks", "无后台任务"),
+          },
+        });
+        return true;
+      }
       if (cmd === "status") {
+        // 上下文占用取自新鲜 snapshot（最近一轮真实输入 token / 模型窗口，对齐 Codex /status）。
+        let ctx = "";
+        try {
+          const handle = await host.open(state.meta.id, () => {});
+          handle.close();
+          const usage = handle.snapshot.contextUsage;
+          if (usage) {
+            const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+            ctx = usage.window
+              ? t(
+                  ` · context ${k(usage.tokens)}/${k(usage.window)} (${Math.round((usage.tokens / usage.window) * 100)}%)`,
+                  ` · 上下文 ${k(usage.tokens)}/${k(usage.window)}（${Math.round((usage.tokens / usage.window) * 100)}%）`,
+                )
+              : t(` · context ${k(usage.tokens)} tokens`, ` · 上下文 ${k(usage.tokens)} tokens`);
+          }
+        } catch {
+          /* 上下文信息尽力而为 */
+        }
         dispatch({
           t: "push",
           item: {
@@ -869,6 +924,7 @@ export function App({
                 `会话 ${state.meta.id} · ${state.meta.model} · ${state.meta.cwd}`,
               ) +
               ` · ${state.running ? t("running", "运行中") : t("idle", "空闲")}` +
+              ctx +
               (state.meta.title ? ` · ${state.meta.title}` : ""),
           },
         });
@@ -1109,6 +1165,80 @@ export function App({
             kind: "info",
             text: t(`Language switched to English`, `界面语言已切换为中文`),
           },
+        });
+        return true;
+      }
+      if (cmd === "diff") {
+        // 对齐 Codex /diff：直接展示当前工作区改动（含未跟踪文件），不经模型。
+        const { execFile } = await import("node:child_process");
+        const { promisify } = await import("node:util");
+        const run = promisify(execFile);
+        try {
+          const [diff, untracked] = await Promise.all([
+            run("git", ["-C", state.meta.cwd, "diff", "HEAD", "--stat", "--patch"], {
+              maxBuffer: 4 * 1024 * 1024,
+            }),
+            run("git", ["-C", state.meta.cwd, "ls-files", "--others", "--exclude-standard"]),
+          ]);
+          const MAX_LINES = 400;
+          const lines = diff.stdout.split("\n");
+          const body =
+            lines.length > MAX_LINES
+              ? lines.slice(0, MAX_LINES).join("\n") +
+                t(
+                  `\n… (${lines.length - MAX_LINES} more lines truncated)`,
+                  `\n…（截断 ${lines.length - MAX_LINES} 行）`,
+                )
+              : diff.stdout;
+          const extra = untracked.stdout.trim()
+            ? t("\nUntracked:\n", "\n未跟踪文件：\n") +
+              untracked.stdout
+                .trim()
+                .split("\n")
+                .map((f) => `  ? ${f}`)
+                .join("\n")
+            : "";
+          const text = (body.trim() || t("(no changes)", "（无改动）")) + extra;
+          dispatch({ t: "push", item: { kind: "info", text } });
+        } catch (err) {
+          dispatch({ t: "push", item: { kind: "error", text: errorMessage(err) } });
+        }
+        return true;
+      }
+      if (cmd === "review") {
+        // 对齐 Codex /review：uncommitted（默认）/ branch <base> / commit <sha> / 自定义指令。
+        const target = rest.join(" ").trim();
+        let scope: string;
+        if (!target || target === "uncommitted") {
+          scope = t(
+            "the uncommitted changes (run `git diff HEAD` and `git status --short`; include untracked files)",
+            "未提交的改动（执行 `git diff HEAD` 与 `git status --short`，包含未跟踪文件）",
+          );
+        } else if (rest[0] === "branch") {
+          const base = rest[1] ?? "main";
+          scope = t(
+            `the changes of this branch against merge-base with ${base} (run \`git diff $(git merge-base HEAD ${base})...HEAD\`)`,
+            `当前分支相对 ${base} 合并基的改动（执行 \`git diff $(git merge-base HEAD ${base})...HEAD\`）`,
+          );
+        } else if (rest[0] === "commit") {
+          const sha = rest[1] ?? "HEAD";
+          scope = t(
+            `the commit ${sha} (run \`git show ${sha}\`)`,
+            `提交 ${sha}（执行 \`git show ${sha}\`）`,
+          );
+        } else {
+          scope = target; // 自定义审查指令原样交给模型
+        }
+        const prompt = t(
+          `Act as a rigorous code reviewer. Review ${scope}.
+Requirements: read the actual diff and surrounding code before judging; verify each finding against the codebase instead of pattern-matching. Report only real issues (correctness bugs, security risks, data loss, race conditions, broken contracts, missing tests for changed behavior) — no style nits unless they hide bugs, no praise. For each finding give: severity (P0/P1/P2), file:line, what breaks and a concrete failure scenario, and a minimal suggested fix. If the changes look sound after genuine verification, say so briefly. Do NOT modify any files.`,
+          `请以严格代码审查者的身份审查${scope}。
+要求：先读真实 diff 与周边代码再下结论；每个发现都要对照代码库核实，不要凭模式匹配臆断。只报真实问题（正确性 bug、安全风险、数据丢失、竞态、契约破坏、改动行为缺测试）——不报无关风格问题、不写夸奖。每个发现给出：严重级（P0/P1/P2）、file:line、会坏在哪里及具体失败场景、最小修复建议。若认真核实后确无问题，简短说明即可。不要修改任何文件。`,
+        );
+        dispatch({ t: "running", v: true });
+        void host.send(sessionId, prompt).catch((err) => {
+          dispatch({ t: "running", v: false });
+          dispatch({ t: "push", item: { kind: "error", text: errorMessage(err) } });
         });
         return true;
       }
@@ -2120,6 +2250,8 @@ function handleEvent(
     setPendings((q) =>
       mergePendings(q, [{ permId: se.permId, toolName: se.toolName, ruleKey: se.ruleKey }]),
     );
+    // 终端响铃：用户可能不在窗口前，授权请求值得一声提醒（终端可自行静音/转徽标）。
+    process.stdout.write("\x07");
     return;
   }
   if (se.type === "permission_resolved") {

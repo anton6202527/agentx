@@ -37,6 +37,7 @@ export type HookEventName =
   | "PostCompact"
   | "SubagentStart"
   | "SubagentStop"
+  | "Notification"
   | "Stop";
 
 export interface HookPayload {
@@ -61,6 +62,13 @@ export interface HookPayload {
   afterTokens?: number;
   /** Stop：本次 drive 中 Stop hook 已强制继续过几轮 */
   stopContinuations?: number;
+  /**
+   * Notification（观察性，对齐 Codex notify / Claude Code Notification hook）：
+   * turn_done=一次 drive 收尾；permission_request=需要用户裁决授权。
+   * 配合 anicode.json 的命令 hook 可外接桌面通知/提示音。
+   */
+  notificationType?: "turn_done" | "permission_request";
+  message?: string;
 }
 
 export interface HookResult {

@@ -83,6 +83,7 @@ export {
 export { Chan } from "./chan.js";
 export { discoverSkills, skillListPrompt, createSkillTool, type SkillMeta } from "./skills.js";
 export { discoverSubagents, parseSubagentFile } from "./agents-fs.js";
+export { discoverPlugins, type PluginDirs } from "./plugins.js";
 export {
   commandHook,
   commandHooksFromConfig,
@@ -101,6 +102,7 @@ export {
   type SessionManagerOptions,
   type SessionEvent,
   type SessionSnapshot,
+  type BackgroundTaskSummary,
   type SessionSummary,
   type SessionListener,
   type GlobalListener,
@@ -140,6 +142,7 @@ export {
 } from "./session.js";
 export { SqliteSessionStore, sqliteAvailable } from "./session-sqlite.js";
 export * from "./daemon/index.js";
+export { serveMcp, type McpServeOptions } from "./mcp-server.js";
 export {
   McpClient,
   connectMcpServers,

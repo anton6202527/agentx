@@ -1,17 +1,15 @@
 /**
- * 测试用假 MCP server —— 实现 JSON-RPC 2.0 over stdio（Content-Length 分帧），
+ * 测试用假 MCP server —— 实现 JSON-RPC 2.0 over stdio（MCP 规范的换行分隔 JSON），
  * 支持 initialize / tools/list / tools/call / resources/* / prompts/*。
  * 工具：echo、fail、hang（永不响应，测超时）、notify_changed（先发
  * notifications/tools/list_changed 再响应，测动态刷新）。
  * 供 mcp.test.ts 以子进程方式启动，验证 McpClient 的真实协议往返。
  */
 
-let buffer = Buffer.alloc(0);
+let buffer = "";
 
 function writeFrame(obj: unknown): void {
-  const body = Buffer.from(JSON.stringify(obj), "utf8");
-  const header = Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, "ascii");
-  process.stdout.write(Buffer.concat([header, body]));
+  process.stdout.write(JSON.stringify(obj) + "\n");
 }
 
 function handle(msg: any): void {
@@ -139,23 +137,14 @@ function handle(msg: any): void {
 }
 
 process.stdin.on("data", (chunk: Buffer) => {
-  buffer = Buffer.concat([buffer, chunk]);
-  while (true) {
-    const sep = buffer.indexOf("\r\n\r\n");
-    if (sep < 0) return;
-    const header = buffer.subarray(0, sep).toString("ascii");
-    const m = /Content-Length:\s*(\d+)/i.exec(header);
-    if (!m) {
-      buffer = buffer.subarray(sep + 4);
-      continue;
-    }
-    const len = Number(m[1]);
-    const start = sep + 4;
-    if (buffer.length < start + len) return;
-    const body = buffer.subarray(start, start + len).toString("utf8");
-    buffer = buffer.subarray(start + len);
+  buffer += chunk.toString("utf8");
+  let nl: number;
+  while ((nl = buffer.indexOf("\n")) >= 0) {
+    const line = buffer.slice(0, nl).replace(/\r$/, "").trim();
+    buffer = buffer.slice(nl + 1);
+    if (!line) continue;
     try {
-      handle(JSON.parse(body));
+      handle(JSON.parse(line));
     } catch {
       /* ignore */
     }

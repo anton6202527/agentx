@@ -29,6 +29,9 @@ import {
   HttpSessionHost,
   HttpDaemonServer,
   loadConfig,
+  serveMcp,
+  discoverPlugins,
+  type PluginDirs,
   loadProjectEnv,
   resolveDefaultModel,
   commandHooksFromConfig,
@@ -483,7 +486,12 @@ export function resolveConfiguredProvider(model: string) {
 
 export async function buildHost(
   args: CliArgs,
-  extras: { config?: AnicodeConfig; extraTools?: Tool[]; deferredTools?: Tool[] } = {},
+  extras: {
+    config?: AnicodeConfig;
+    extraTools?: Tool[];
+    deferredTools?: Tool[];
+    plugins?: PluginDirs;
+  } = {},
 ): Promise<SessionHost> {
   if (args.daemon) {
     return DaemonClient.connect(args.socket);
@@ -500,13 +508,24 @@ export async function buildHost(
 /** 本地 SessionManager 构造：LocalSessionHost 与 `anicode serve` 共用同一套装配。 */
 export function buildManager(
   args: Pick<CliArgs, "sessionsDir" | "permissionMode">,
-  extras: { config?: AnicodeConfig; extraTools?: Tool[]; deferredTools?: Tool[] } = {},
+  extras: {
+    config?: AnicodeConfig;
+    extraTools?: Tool[];
+    deferredTools?: Tool[];
+    /** 插件目录（discoverPlugins 的产物）：agents/skills 子目录并入既有发现器。 */
+    plugins?: PluginDirs;
+  } = {},
 ): SessionManager {
   const config = extras.config ?? {};
-  // 配置里的自定义 agents + 文件系统发现（.claude/agents/*.md，首次 send 时扫描）；
+  // 配置里的自定义 agents + 文件系统发现（.claude/agents/*.md + 插件 agents/，首次 send 时扫描）；
   // 程序化（config）定义同名覆盖文件定义，内置 general/explore 始终可用。
   const configAgents = toSubagentDefinitions(config);
-  const subagents = { discover: true, definitions: configAgents };
+  const subagents = {
+    discover: true,
+    definitions: configAgents,
+    ...(extras.plugins?.agents.length ? { dirs: extras.plugins.agents } : {}),
+  };
+  const skills = extras.plugins?.skills.length ? { dirs: extras.plugins.skills } : true;
   const extraTools = extras.extraTools ?? [];
   const deferredTools = extras.deferredTools ?? [];
   const manager = new SessionManager({
@@ -524,7 +543,7 @@ export function buildManager(
     // 配置里的权限档位：自定义档位表 + 启动即生效的档位名（/profile 运行时可再切）。
     ...(config.permissionProfiles ? { permissionProfiles: config.permissionProfiles } : {}),
     ...(config.permissionProfile ? { permissionProfile: config.permissionProfile } : {}),
-    skills: true,
+    skills,
     subagents,
     checkpoints: true, // 每轮前记工作区 git 快照，支持 /undo 回滚文件改动
     repoMap: true, // 会话开始注入代码骨架（repo map），帮模型少盲 grep、首次定位更准
@@ -620,6 +639,49 @@ export async function selectSessionId(
  * `anicode auth <login|logout|list> [provider]` —— 订阅登录（目前 Anthropic Claude Pro/Max）。
  * login 走 PKCE：打开浏览器授权 → 用户粘回 `code#state` → 换 token 存 ~/.anicode/auth.json。
  */
+/**
+ * `anicode mcp` —— 把 anicode 作为 MCP server 暴露（对齐 `codex mcp-server`）。
+ * stdio 换行分隔 JSON-RPC；工具 anicode（新会话跑任务）/ anicode_reply（续会话）。
+ * 嵌入场景无人点确认框 → 权限默认 auto（可 --permission-mode 覆盖，deny 规则仍最先生效）。
+ */
+export async function runMcpCommand(
+  argv: string[],
+  io: { input?: NodeJS.ReadableStream; output?: NodeJS.WritableStream } = {},
+): Promise<{ close(): void }> {
+  let cwd = process.cwd();
+  let model: string | undefined;
+  let sessionsDir = path.join(os.homedir(), ".anicode", "sessions");
+  let permissionMode: CliArgs["permissionMode"] = "auto";
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === "--cwd") {
+      cwd = path.resolve(requiredValue(argv, i, arg));
+      i++;
+    } else if (arg === "--model") {
+      model = requiredValue(argv, i, arg);
+      i++;
+    } else if (arg === "--sessions") {
+      sessionsDir = path.resolve(requiredValue(argv, i, arg));
+      i++;
+    } else if (arg === "--permission-mode") {
+      permissionMode = requiredValue(argv, i, arg) as CliArgs["permissionMode"];
+      i++;
+    } else {
+      throw new Error(t(`Unknown mcp argument: ${arg}`, `mcp 未知参数: ${arg}`));
+    }
+  }
+  const { config } = await loadConfig({ cwd });
+  const manager = buildManager({ sessionsDir, permissionMode }, { config });
+  return serveMcp({
+    manager,
+    model: model ?? config.model ?? resolveDefaultModel(),
+    cwd,
+    ...(io.input ? { input: io.input } : {}),
+    ...(io.output ? { output: io.output } : {}),
+    serverInfo: { name: "anicode", version: CLI_VERSION },
+  });
+}
+
 export async function runAuthCommand(
   argv: string[],
   io: { input?: NodeJS.ReadableStream; output?: NodeJS.WritableStream } = {},
@@ -743,6 +805,17 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // auth/serve 子命令在 parseArgs 之前拦截（不进会话流程）。
   if (argv[0] === "auth") {
     await runAuthCommand(argv.slice(1));
+    return;
+  }
+  if (argv[0] === "mcp") {
+    await loadProjectEnv({ cwd: process.cwd() });
+    await runMcpCommand(argv.slice(1));
+    // stdio server 常驻直到 stdin 关闭（客户端断开）或收到信号。
+    await new Promise<void>((resolve) => {
+      process.stdin.once("end", resolve);
+      process.once("SIGINT", resolve);
+      process.once("SIGTERM", resolve);
+    });
     return;
   }
   if (argv[0] === "serve") {
@@ -869,8 +942,17 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   ];
   const deferredTools: Tool[] = deferMcp ? mcpTools : [];
 
-  // 自定义斜杠命令（.anicode/command/*.md，全局+项目）。
-  const commands: CustomCommand[] = args.daemon ? [] : await loadCommands({ cwd: args.cwd });
+  // 插件目录（~/.anicode/plugins + <cwd>/.anicode/plugins）：agents/skills/commands
+  // 子目录并入既有发现器（对齐 Claude Code plugins 的「目录捆绑扩展」形态）。
+  const plugins = args.daemon ? undefined : await discoverPlugins(args.cwd);
+
+  // 自定义斜杠命令（.anicode/command/*.md，全局+插件+项目）。
+  const commands: CustomCommand[] = args.daemon
+    ? []
+    : await loadCommands({
+        cwd: args.cwd,
+        ...(plugins?.commands.length ? { extraDirs: plugins.commands } : {}),
+      });
 
   // MCP prompts → 斜杠命令 /mcp__<server>__<prompt>（对齐 Claude Code）。
   // 定位参数按 prompt 声明的 arguments 顺序映射；渲染经 prompts/get 实时取。
@@ -939,7 +1021,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   let host: SessionHost | undefined;
   try {
-    const baseHost = await buildHost(args, { config, extraTools, deferredTools }).catch((err) => {
+    const baseHost = await buildHost(args, {
+      config,
+      extraTools,
+      deferredTools,
+      ...(plugins ? { plugins } : {}),
+    }).catch((err) => {
       throw new Error(
         t(
           `Failed to establish session host: ${(err as Error).message}`,

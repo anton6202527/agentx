@@ -55,6 +55,8 @@ export interface SubagentDefinition {
   disallowedTools?: string[];
   /** 覆盖模型；裸 id 沿用父 provider，provider/model 可跨 provider（需 resolver）。 */
   model?: string;
+  /** 推理深度覆盖（对齐 Codex agents 的 model_reasoning_effort）；缺省继承父级默认。 */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
   maxTurns?: number;
   /**
    * 只读调研型：子 agent 工具面被收窄到只读工具（不能写文件/跑命令），因此**无副作用**，
@@ -458,6 +460,7 @@ export function createTaskTools(opts: TaskToolOptions): TaskTools {
       cwd,
       ...(opts.sandbox ? { sandbox: opts.sandbox } : {}),
       system: def.system ?? subagentSystem(),
+      ...(def.effort ? { effort: def.effort } : {}),
       // 子 agent 不重复采集环境（每次都 spawn git，量大时拖慢）；父会话已接地。
       injectEnv: false,
       tools: childTools,

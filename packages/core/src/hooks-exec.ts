@@ -38,6 +38,7 @@ const HOOK_EVENTS: readonly HookEventName[] = [
   "PostCompact",
   "SubagentStart",
   "SubagentStop",
+  "Notification",
   "Stop",
 ];
 

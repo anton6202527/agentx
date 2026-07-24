@@ -68,6 +68,16 @@ export type RewindMode = "files" | "conversation" | "both";
 /** allow_remember=本会话记住；allow_always=写入项目本地设置，跨会话生效。 */
 export type PermissionAnswer = "allow" | "allow_remember" | "allow_always" | "deny";
 
+/** 后台子 agent 任务的可序列化摘要（晚订阅者/daemon 客户端观测用）。 */
+export interface BackgroundTaskSummary {
+  id: string;
+  type: string;
+  description: string;
+  status: "running" | "done" | "error" | "stopped";
+  background: boolean;
+  worktree?: string;
+}
+
 export interface SessionSnapshot {
   meta: SessionMeta;
   messages: ChatMessage[];
@@ -77,6 +87,10 @@ export interface SessionSnapshot {
   running: boolean;
   /** 订阅时仍待裁决的权限请求（重连场景不至于卡死） */
   pendingPermissions: { permId: string; toolName: string; ruleKey: string }[];
+  /** 后台子 agent 任务一览（无 task 工具或无任务时为空数组/缺省）。 */
+  backgroundTasks?: BackgroundTaskSummary[];
+  /** 当前上下文占用（最近一轮真实输入 token / 模型窗口）；未跑过轮次时缺省。 */
+  contextUsage?: { tokens: number; window?: number };
 }
 
 export interface SessionSummary extends SessionMeta {
@@ -216,6 +230,19 @@ class ManagedSession {
         toolName: p.toolName,
         ruleKey: p.ruleKey,
       })),
+      ...(this.agent.contextUsage ? { contextUsage: this.agent.contextUsage } : {}),
+      ...(this.agent.backgroundTasks.length > 0
+        ? {
+            backgroundTasks: this.agent.backgroundTasks.map((r) => ({
+              id: r.id,
+              type: r.type,
+              description: r.description,
+              status: r.status,
+              background: r.background,
+              ...(r.worktree && !r.worktreeRemoved ? { worktree: r.worktree } : {}),
+            })),
+          }
+        : {}),
     };
   }
 

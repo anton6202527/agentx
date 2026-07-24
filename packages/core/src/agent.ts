@@ -498,6 +498,17 @@ export class Agent {
           }
           if (h.allowed) return { behavior: "allow" };
         }
+        // Notification（观察性）：即将弹授权确认，用户可能不在屏幕前 —— 外接提醒的时机。
+        if (this.hooks.has("Notification")) {
+          await this.hooks.run({
+            event: "Notification",
+            cwd: this.cwd,
+            notificationType: "permission_request",
+            toolName: req.toolName,
+            ruleKey: req.ruleKey,
+            message: req.ruleKey,
+          });
+        }
         return baseConfirm(req);
       });
     // 只读/编辑类工具名并入权限引擎：只读自动放行，编辑类供 acceptEdits 决策
@@ -599,6 +610,15 @@ export class Agent {
   }
   get messages(): readonly ChatMessage[] {
     return this.history;
+  }
+  /**
+   * 当前上下文占用：最近一次 provider 调用的真实输入 token（含 system+tools+缓存），
+   * 以及模型上下文窗口（有 modelInfo 时）。未跑过任何轮次时为 null。
+   */
+  get contextUsage(): { tokens: number; window?: number } | null {
+    if (!this.lastInputTokens) return null;
+    const window = this.modelInfoOpt?.limits.contextWindow;
+    return { tokens: this.lastInputTokens, ...(window ? { window } : {}) };
   }
   snapshot(): AgentSnapshot {
     return { messages: [...this.history], usage: this.cumulative };
@@ -936,6 +956,15 @@ export class Agent {
           }
         }
         this.acceptingQueuedInput = false;
+        // Notification（观察性）：一次 drive 收尾，供外接桌面通知/提示音。
+        if (this.hooks.has("Notification")) {
+          await this.hooks.run({
+            event: "Notification",
+            cwd: this.cwd,
+            notificationType: "turn_done",
+            message: lastAssistantHead(this.history),
+          });
+        }
         {
           const costUSD = this.estimatedCostUSD;
           yield {
@@ -1663,6 +1692,20 @@ function isTransientError(err: unknown): boolean {
  * 从 provider 错误里解析 Retry-After（秒数或 HTTP 日期），返回毫秒；无则 null。
  * SDK 错误通常带 headers（Headers 实例或普通对象）。
  */
+/** 最后一条 assistant 文本的首行（Notification hook 的 message，截 120 字符）。 */
+function lastAssistantHead(messages: ChatMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== "assistant") continue;
+    for (const p of m.content) {
+      if (p.type === "text" && p.text.trim()) {
+        return p.text.trim().split("\n")[0]!.slice(0, 120);
+      }
+    }
+  }
+  return "";
+}
+
 export function retryAfterMs(err: unknown, now: number = Date.now()): number | null {
   const headers = (err as { headers?: unknown })?.headers;
   if (!headers) return null;

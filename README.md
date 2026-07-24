@@ -258,7 +258,10 @@ registerOpenAICompatibleProvider({
 - 两级 compaction：先清理旧工具输出，再在安全边界生成摘要，保持 tool call/result 配对。
 - JSONL 会话持久化、resume、最近活跃排序、悬空工具调用自愈。
 - `SessionHost` 抽象与 daemon pub/sub：本地 TUI 和远程客户端使用同一接口，多客户端可观察、接管和裁决权限。
-- 最小 MCP stdio 客户端。
+- MCP：stdio（规范的换行分隔 JSON-RPC）+ Streamable HTTP 客户端；`anicode mcp` 把自身暴露为 MCP server（`anicode` 跑新会话 / `anicode_reply` 续会话，对齐 `codex mcp-server`），任意 MCP 客户端可嵌入。
+- Notification hook（turn_done / permission_request）+ TUI 授权响铃：配合 anicode.json 命令 hook 可外接桌面通知（对齐 Codex notify）。
+- 插件目录：`~/.anicode/plugins/<name>/` 与项目 `.anicode/plugins/<name>/` 下的 agents/skills/commands 子目录自动并入发现器（Claude Code plugins 的精简形态）。
+- TUI：`/diff`（工作区改动）、`/review`（uncommitted/branch/commit/自定义 四模式审查）、`/tasks`（后台任务一览）、`/status` 显示上下文占用（tokens/窗口/百分比）。
 
 ## TUI 参数
 

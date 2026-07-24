@@ -147,3 +147,11 @@ test("Agent(subagents 数组): 构造期注册（行为不回退）", async () =
   assert.ok(task);
   assert.match(task.description, /custom/);
 });
+
+test("parseSubagentFile: effort/readonly 解析（非法 effort 丢弃）", () => {
+  const ok = parseSubagentFile("fast.md", `---\nname: fast\ndescription: 快\neffort: low\nreadonly: "true"\n---\n正文`);
+  assert.equal(ok!.effort, "low");
+  assert.equal(ok!.readOnly, true);
+  const bad = parseSubagentFile("x.md", `---\nname: x\ndescription: d\neffort: turbo\n---\n`);
+  assert.equal(bad!.effort, undefined);
+});

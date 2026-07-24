@@ -27,9 +27,13 @@ export interface ConfigAgent {
   /** 禁用工具（支持 * glob）；在 tools/继承集确定后剔除。 */
   disallowedTools?: string[];
   model?: string;
+  /** 推理深度覆盖（对齐 Codex model_reasoning_effort）。 */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
   maxTurns?: number;
   /** 编排型：保留 task 工具以便再往下派子 agent（受 MAX_SUBAGENT_DEPTH 深度上限约束）。 */
   orchestrator?: boolean;
+  /** 只读调研型：工具面收窄到只读工具，可并行 fan-out。 */
+  readOnly?: boolean;
 }
 
 export interface AnicodeConfig {
@@ -362,7 +366,9 @@ export function toSubagentDefinitions(config: AnicodeConfig): SubagentDefinition
     ...(a.tools ? { tools: a.tools } : {}),
     ...(a.disallowedTools ? { disallowedTools: a.disallowedTools } : {}),
     ...(a.model ? { model: a.model } : {}),
+    ...(a.effort ? { effort: a.effort } : {}),
     ...(a.maxTurns ? { maxTurns: a.maxTurns } : {}),
     ...(a.orchestrator ? { orchestrator: true } : {}),
+    ...(a.readOnly ? { readOnly: true } : {}),
   }));
 }

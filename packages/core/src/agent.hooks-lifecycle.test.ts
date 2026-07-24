@@ -236,3 +236,44 @@ test("SubagentStart: block 阻止派生；SubagentStop 观察结果", async () =
   assert.match(r2.content, /子结论/);
   assert.deepEqual(lifecycle, ["start:explore:调研", "stop:explore:err=false"]);
 });
+
+test("Notification: drive 收尾触发 turn_done，授权确认前触发 permission_request", async () => {
+  const seen: { type?: string; message?: string; toolName?: string }[] = [];
+  const order: string[] = [];
+  const agent = new Agent({
+    provider: scriptedProvider(toolCallScript("sideeffect")),
+    model: "m",
+    cwd: process.cwd(),
+    retry: false,
+    projectMemory: false,
+    injectEnv: false,
+    tools: new ToolRegistry().register(sideEffectTool),
+    permission: {
+      mode: "default",
+      confirm: async () => {
+        order.push("confirm");
+        return { behavior: "allow" };
+      },
+    },
+    hooks: [
+      {
+        event: "Notification",
+        handler: (p) => {
+          order.push(`notify:${p.notificationType}`);
+          seen.push({
+            ...(p.notificationType ? { type: p.notificationType } : {}),
+            ...(p.message ? { message: p.message } : {}),
+            ...(p.toolName ? { toolName: p.toolName } : {}),
+          });
+        },
+      },
+    ],
+  });
+  for await (const _ of agent.send("干活")) {
+    /* drain */
+  }
+  // 授权前先响 permission_request；收尾响 turn_done，message 是最后一条 assistant 文本首行。
+  assert.deepEqual(order, ["notify:permission_request", "confirm", "notify:turn_done"]);
+  assert.equal(seen[0]!.toolName, "sideeffect");
+  assert.equal(seen[1]!.message, "完成");
+});
